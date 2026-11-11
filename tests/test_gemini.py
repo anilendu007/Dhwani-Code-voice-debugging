@@ -3,6 +3,7 @@ import io
 import json
 import unittest
 import wave
+from unittest.mock import AsyncMock, patch
 
 from fastapi.testclient import TestClient
 import httpx
@@ -90,6 +91,47 @@ class GeminiClientTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(error.exception.code, "MODEL_NOT_AVAILABLE")
         self.assertIn("/api/models", error.exception.message)
+
+    async def test_transient_model_overload_retries_and_succeeds(self) -> None:
+        requests = []
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            if len(requests) == 1:
+                return httpx.Response(503, json={"error": {"status": "UNAVAILABLE"}})
+            return httpx.Response(200, json={"ok": True})
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+            client = main.GeminiClient(settings(), http)
+            with patch.object(main.asyncio, "sleep", new_callable=AsyncMock) as sleep:
+                result = await client._post("models/gemini-test:generateContent", {}, "analysis")
+
+        self.assertEqual(result, {"ok": True})
+        self.assertEqual(len(requests), 2)
+        sleep.assert_awaited_once_with(1)
+
+    async def test_persistent_model_overload_returns_clear_retry_message(self) -> None:
+        requests = []
+
+        async def handler(_: httpx.Request) -> httpx.Response:
+            requests.append(True)
+            return httpx.Response(503, json={
+                "error": {
+                    "status": "UNAVAILABLE",
+                    "message": "This model is currently experiencing high demand.",
+                },
+            })
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+            client = main.GeminiClient(settings(), http)
+            with patch.object(main.asyncio, "sleep", new_callable=AsyncMock):
+                with self.assertRaises(main.PipelineError) as error:
+                    await client._post("models/gemini-test:generateContent", {}, "analysis")
+
+        self.assertEqual(len(requests), 3)
+        self.assertEqual(error.exception.code, "GEMINI_TEMPORARILY_UNAVAILABLE")
+        self.assertEqual(error.exception.status, 503)
+        self.assertIn("high demand", error.exception.message)
 
     async def test_transcription_sends_audio_with_server_key(self) -> None:
         requests = []

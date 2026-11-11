@@ -478,6 +478,8 @@ class GeminiClient:
     """Use one Gemini API key for transcription, code analysis, and speech generation."""
 
     API = "https://generativelanguage.googleapis.com/v1beta"
+    TRANSIENT_STATUS_CODES = {500, 502, 503, 504}
+    MAX_TRANSIENT_RETRIES = 2
     FIX_SCHEMA = {
         "type": "OBJECT",
         "properties": {
@@ -498,16 +500,49 @@ class GeminiClient:
             raise PipelineError(stage, "NO_API_KEY", "GEMINI_API_KEY is not set. Add it to .env and restart.", 503)
         return {"x-goog-api-key": self.s.gemini_api_key}
 
-    async def _post(self, path: str, payload: dict[str, Any], stage: str) -> dict[str, Any]:
+    @classmethod
+    def _is_transient_failure(cls, response: httpx.Response) -> bool:
+        if response.status_code in cls.TRANSIENT_STATUS_CODES:
+            return True
         try:
-            response = await self._http.post(
-                f"{self.API}/{path}",
-                headers=self._headers(stage),
-                json=payload,
-                timeout=httpx.Timeout(self.s.gemini_timeout, connect=10.0),
+            code = str(response.json().get("error", {}).get("status", ""))
+        except (ValueError, AttributeError):
+            return False
+        return code in ("UNAVAILABLE", "INTERNAL")
+
+    async def _post_with_retry(
+        self,
+        url: str,
+        payload: dict[str, Any],
+        headers: dict[str, str],
+        stage: str,
+    ) -> httpx.Response:
+        for attempt in range(self.MAX_TRANSIENT_RETRIES + 1):
+            try:
+                response = await self._http.post(
+                    url,
+                    headers=headers,
+                    json=payload,
+                    timeout=httpx.Timeout(self.s.gemini_timeout, connect=10.0),
+                )
+            except httpx.HTTPError as exc:
+                raise PipelineError(
+                    stage, "GEMINI_UNREACHABLE", f"Could not reach Gemini: {exc.__class__.__name__}.", 502
+                ) from exc
+            if not self._is_transient_failure(response) or attempt == self.MAX_TRANSIENT_RETRIES:
+                return response
+            delay = 2 ** attempt
+            log.warning(
+                "Gemini %s request returned a transient error; retrying in %d second(s) (%d/%d)",
+                stage, delay, attempt + 1, self.MAX_TRANSIENT_RETRIES,
             )
-        except httpx.HTTPError as exc:
-            raise PipelineError(stage, "GEMINI_UNREACHABLE", f"Could not reach Gemini: {exc.__class__.__name__}.", 502) from exc
+            await asyncio.sleep(delay)
+        raise RuntimeError("Gemini retry loop ended unexpectedly")
+
+    async def _post(self, path: str, payload: dict[str, Any], stage: str) -> dict[str, Any]:
+        response = await self._post_with_retry(
+            f"{self.API}/{path}", payload, self._headers(stage), stage
+        )
         if response.status_code != 200:
             try:
                 body = response.json()
@@ -524,6 +559,14 @@ class GeminiClient:
                     "Open /api/models to see models enabled for this key, then set GEMINI_MODEL or "
                     "GEMINI_TTS_MODEL to an available model. Use the model ID, not the Google Cloud project ID.",
                     400,
+                )
+            if response.status_code in self.TRANSIENT_STATUS_CODES or code in ("UNAVAILABLE", "INTERNAL"):
+                raise PipelineError(
+                    stage,
+                    "GEMINI_TEMPORARILY_UNAVAILABLE",
+                    "Gemini is temporarily overloaded or unavailable. The request was retried; please try again in a minute."
+                    + (f" Details: {message}" if message else ""),
+                    503,
                 )
             status = response.status_code if response.status_code in (400, 413, 429) else 502
             raise PipelineError(stage, code, message or f"Gemini API returned HTTP {response.status_code}.", status)
@@ -667,15 +710,12 @@ class GeminiClient:
             "response_format": {"type": "audio"},
             "generation_config": {"speech_config": [{"voice": self.s.gemini_tts_voice}]},
         }
-        try:
-            response = await self._http.post(
-                f"{self.API}/interactions",
-                headers={**self._headers("tts"), "Api-Revision": "2026-05-20"},
-                json=payload,
-                timeout=httpx.Timeout(self.s.gemini_timeout, connect=10.0),
-            )
-        except httpx.HTTPError as exc:
-            raise PipelineError("tts", "GEMINI_UNREACHABLE", f"Could not reach Gemini TTS: {exc.__class__.__name__}.", 502) from exc
+        response = await self._post_with_retry(
+            f"{self.API}/interactions",
+            payload,
+            {**self._headers("tts"), "Api-Revision": "2026-05-20"},
+            "tts",
+        )
         if response.status_code != 200:
             try:
                 error = response.json().get("error", {})
@@ -690,6 +730,15 @@ class GeminiClient:
                     f"TTS model '{self.s.gemini_tts_model}' was not found or is not available to this API key/project. "
                     "Check the Gemini API model list for this key, then set GEMINI_TTS_MODEL to an available TTS model.",
                     400,
+                )
+            if response.status_code in self.TRANSIENT_STATUS_CODES or code in ("UNAVAILABLE", "INTERNAL"):
+                raise PipelineError(
+                    "tts",
+                    "GEMINI_TEMPORARILY_UNAVAILABLE",
+                    "Gemini speech generation is temporarily overloaded or unavailable. "
+                    "The request was retried; please try again in a minute."
+                    + (f" Details: {message}" if message else ""),
+                    503,
                 )
             status = response.status_code if response.status_code in (400, 413, 429) else 502
             raise PipelineError("tts", f"GEMINI_TTS_HTTP_{response.status_code}", message or "Gemini speech generation failed.", status)

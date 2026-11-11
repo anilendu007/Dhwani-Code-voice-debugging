@@ -37,6 +37,8 @@ The model returns structured JSON with a root cause, optional line number, sugge
 
 The browser records audio and converts it to 16 kHz mono WAV. The backend sends it to Gemini, then sends the transcript and editor context for analysis. Gemini TTS returns WAV audio; the backend converts it to PCM for the existing SSE/WebSocket audio player. TTS is generated before the audio event is sent, so playback starts after that generation call completes.
 
+Transient Gemini server errors (including temporary high-demand responses) are retried up to twice with a short backoff. Persistent overload is reported as a temporary service error; retry later rather than changing the model or API key.
+
 ## Local setup
 
 Requirements: Python 3.10+ and a recent browser with MediaRecorder and Web Audio support.
