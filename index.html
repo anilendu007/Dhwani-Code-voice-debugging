@@ -389,7 +389,7 @@ const OWNER = (() => {
 })();
 const authHeaders = () => (OWNER ? { "X-Owner-Key": OWNER } : {});
 const STARTING = "The server is starting or restarting. On Render this happens after a deploy and when a free service wakes from sleep. Wait about a minute and refresh. If it stays like this, open the Logs tab on Render and look at the last lines.";
-const MAX_RECORD_S = 28; // Prisma's REST limit is 30 s
+const MAX_RECORD_S = 28; // Keep browser uploads below the 30-second audio limit.
 
 const $ = (sel) => document.querySelector(sel);
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -563,18 +563,17 @@ async function loadConfig() {
     if (!res.ok) { const e = new Error("bad-status"); e.status = res.status; throw e; }
     const cfg = await res.json();
     state.cfg = cfg;
-    const keyOk = cfg.gnani_key_configured;
+    const keyOk = cfg.gemini_key_configured;
     $("#engines").innerHTML = [
-      { name: pretty(cfg.stt_model), cls: keyOk ? "ok" : "bad", tip: keyOk ? "Speech recognition" : "GNANI_API_KEY is not set" },
-      { name: cfg.reasoning_label, cls: cfg.reasoning === "evon" ? "ok" : "warn",
-        tip: cfg.reasoning === "evon" ? "Reasoning model" : "No reasoning model is connected, so only three sample bug patterns are understood" },
-      { name: pretty(cfg.tts_model), cls: keyOk ? "ok" : "bad", tip: keyOk ? "Speech synthesis" : "GNANI_API_KEY is not set" },
+      { name: `Gemini audio · ${pretty(cfg.stt_model)}`, cls: keyOk ? "ok" : "bad", tip: keyOk ? "Speech recognition" : "GEMINI_API_KEY is not set" },
+      { name: `Gemini code · ${pretty(cfg.analysis_model)}`, cls: keyOk ? "ok" : "bad", tip: keyOk ? "Logical bug analysis" : "GEMINI_API_KEY is not set" },
+      { name: `Gemini voice · ${pretty(cfg.tts_model)}`, cls: keyOk ? "ok" : "bad", tip: keyOk ? "Speech synthesis" : "GEMINI_API_KEY is not set" },
     ].map((e) => `<li title="${esc(e.tip)}"><span class="dot ${e.cls}"></span>${esc(e.name)}</li>`).join("");
 
     $("#langs").innerHTML = cfg.profiles.map((p) =>
       `<label><input type="radio" name="lang" value="${p.key}"${p.key === state.profile ? " checked" : ""}><span>${esc(p.label)}</span></label>`
     ).join("");
-    if (!keyOk) showAlert("GNANI_API_KEY is not set. Add it to your .env file and restart the server. You can still type questions, but voice needs the key.");
+    if (!keyOk) showAlert("GEMINI_API_KEY is not set. Add it to your .env file and restart the server. Gemini is required for voice and code analysis.");
     updateHints();
   } catch (err) {
     state.cfg = { profiles: [{ key: "hinglish", label: "Hinglish" }, { key: "hindi", label: "Hindi" }, { key: "tanglish", label: "Tamil" }] };
@@ -593,8 +592,8 @@ $("#langs").addEventListener("change", (e) => {
 
 /* ------------------------------------------------------------------ *
  * Recording (MediaRecorder) and conversion to 16 kHz mono WAV.
- * Prisma accepts WAV/MP3/OGG/FLAC/AAC/M4A but not the WebM that Chrome records,
- * so every browser's recording is normalised to WAV before upload.
+ * The backend accepts WAV/MP3/OGG/FLAC/AAC/M4A, so browser recordings are
+ * normalised to WAV before upload.
  * ------------------------------------------------------------------ */
 const rec = { stream: null, mr: null, chunks: [], ctx: null, analyser: null, raf: 0, started: 0, tick: 0, levels: [] };
 
@@ -858,7 +857,7 @@ function renderFix(ev, ctx) {
       </button>
       <p class="spoken">${esc(ev.spoken || fix.speech_script)}</p>
     </div>
-    <p class="hint">${ev.provider === "demo" ? "Answered by built-in demo rules, not an AI model." : `Reasoning by ${esc(ev.label || "the connected model")}.`}</p>
+    <p class="hint">Analysis by ${esc(ev.label || "Gemini")}.</p>
     ${fix.confidence === "low" ? '<p class="hint">Not sure about this one. Treat it as a hint and check the line.</p>' : ""}`;
   $("#replay").addEventListener("click", () => Player.replay());
 

@@ -1,0 +1,156 @@
+import base64
+import io
+import json
+import unittest
+import wave
+
+from fastapi.testclient import TestClient
+import httpx
+
+import main
+
+
+def settings() -> main.Settings:
+    return main.Settings(
+        gemini_api_key="test-key",
+        gemini_model="gemini-test",
+        gemini_tts_model="gemini-tts-test",
+        gemini_tts_voice="Kore",
+        gemini_timeout=10,
+        max_upload_bytes=1024 * 1024,
+        cors_origins=["*"],
+        rate_limit_per_hour=8,
+        daily_cap=200,
+        owner_key="",
+    )
+
+
+def response_text(text: str) -> dict:
+    return {"candidates": [{"content": {"parts": [{"text": text}]}}]}
+
+
+def wav_bytes() -> bytes:
+    output = io.BytesIO()
+    with wave.open(output, "wb") as audio:
+        audio.setnchannels(1)
+        audio.setsampwidth(2)
+        audio.setframerate(24000)
+        audio.writeframes(b"\x00\x00" * 16)
+    return output.getvalue()
+
+
+class GeminiClientTests(unittest.IsolatedAsyncioTestCase):
+    def test_health_and_config_report_gemini_without_exposing_key(self) -> None:
+        with TestClient(main.app) as client:
+            health = client.get("/api/health").json()
+            config = client.get("/api/config").json()
+
+        self.assertIn("gemini_key_configured", health)
+        self.assertEqual(config["analysis_model"], main.Settings.from_env().gemini_model)
+        self.assertEqual(config["reasoning"], "gemini")
+        self.assertNotIn("api_key", json.dumps(health).lower())
+        self.assertNotIn("api_key", json.dumps(config).lower())
+
+    async def test_transcription_sends_audio_with_server_key(self) -> None:
+        requests = []
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            return httpx.Response(200, json=response_text("why does total stay zero?"))
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+            client = main.GeminiClient(settings(), http)
+            result = await client.transcribe(
+                main.AudioClip(b"fake audio", "speech.wav", "audio/wav"),
+                main.EditorContext(code="total = 0"),
+                main.PROFILES["hinglish"],
+            )
+
+        self.assertEqual(result.text, "why does total stay zero?")
+        self.assertEqual(requests[0].headers["x-goog-api-key"], "test-key")
+        payload = json.loads(requests[0].content)
+        self.assertEqual(payload["contents"][0]["parts"][1]["inlineData"]["mimeType"], "audio/wav")
+        self.assertIn("total = 0", payload["contents"][0]["parts"][0]["text"])
+
+    async def test_analysis_prompts_for_logic_and_rejects_out_of_range_line(self) -> None:
+        requests = []
+        fix = {
+            "root_cause": "The accumulator is reset in the loop.",
+            "line_to_fix": 99,
+            "suggested_code": "total += value",
+            "speech_script": "Line ninety nine is resetting the total.",
+            "confidence": "high",
+        }
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            return httpx.Response(200, json=response_text(json.dumps(fix)))
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+            client = main.GeminiClient(settings(), http)
+            result = await client.analyze(
+                "Why is the result wrong?",
+                main.EditorContext(
+                    file_name="sum.py",
+                    language="Python",
+                    code="def sum_values(values):\n    total = 0\n    return total",
+                ),
+                main.PROFILES["hinglish"],
+            )
+
+        payload = json.loads(requests[0].content)
+        system_prompt = payload["systemInstruction"]["parts"][0]["text"].lower()
+        self.assertIn("trace the relevant code path", system_prompt)
+        self.assertIn("logical bugs", system_prompt)
+        self.assertEqual(payload["generationConfig"]["thinkingConfig"]["thinkingLevel"], "high")
+        self.assertIsNone(result.line_to_fix)
+        self.assertEqual(result.suggested_code, "")
+        self.assertEqual(result.confidence, "low")
+
+    async def test_tts_extracts_pcm_and_sample_rate_from_wav(self) -> None:
+        source_wav = wav_bytes()
+        encoded = base64.b64encode(source_wav).decode("ascii")
+        requests = []
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            return httpx.Response(200, json={"output_audio": {"data": encoded}})
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+            client = main.GeminiClient(settings(), http)
+            pcm, sample_rate, result_wav = await client.speak("Hello", main.PROFILES["hinglish"])
+
+        self.assertTrue(requests[0].url.path.endswith("/interactions"))
+        self.assertEqual(requests[0].headers["x-goog-api-key"], "test-key")
+        self.assertEqual(pcm, b"\x00\x00" * 16)
+        self.assertEqual(sample_rate, 24000)
+        self.assertEqual(result_wav, source_wav)
+
+    async def test_missing_key_fails_before_network_request(self) -> None:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(lambda _: self.fail("unexpected request"))) as http:
+            client = main.GeminiClient(
+                main.Settings(
+                    gemini_api_key="",
+                    gemini_model="gemini-test",
+                    gemini_tts_model="gemini-tts-test",
+                    gemini_tts_voice="Kore",
+                    gemini_timeout=10,
+                    max_upload_bytes=1024,
+                    cors_origins=["*"],
+                    rate_limit_per_hour=8,
+                    daily_cap=200,
+                    owner_key="",
+                ),
+                http,
+            )
+            with self.assertRaises(main.PipelineError) as error:
+                await client.transcribe(
+                    main.AudioClip(b"audio", "speech.wav", "audio/wav"),
+                    main.EditorContext(),
+                    main.PROFILES["hinglish"],
+                )
+        self.assertEqual(error.exception.code, "NO_API_KEY")
+
+
+if __name__ == "__main__":
+    unittest.main()
