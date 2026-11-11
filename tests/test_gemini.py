@@ -44,12 +44,52 @@ class GeminiClientTests(unittest.IsolatedAsyncioTestCase):
         with TestClient(main.app) as client:
             health = client.get("/api/health").json()
             config = client.get("/api/config").json()
+            models_response = client.get("/api/models")
 
         self.assertIn("gemini_key_configured", health)
         self.assertEqual(config["analysis_model"], main.Settings.from_env().gemini_model)
         self.assertEqual(config["reasoning"], "gemini")
+        self.assertEqual(models_response.status_code, 503)
+        self.assertEqual(models_response.json()["error"]["code"], "NO_API_KEY")
         self.assertNotIn("api_key", json.dumps(health).lower())
         self.assertNotIn("api_key", json.dumps(config).lower())
+
+    def test_model_resource_prefix_is_normalized(self) -> None:
+        self.assertEqual(main._model_id(" models/gemini-3.8-flash "), "gemini-3.8-flash")
+
+    async def test_model_list_uses_api_key_and_normalizes_resource_names(self) -> None:
+        requests = []
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            return httpx.Response(200, json={
+                "models": [{
+                    "name": "models/gemini-3.8-flash",
+                    "baseModelId": "gemini-3.8-flash",
+                    "displayName": "Gemini Flash",
+                    "supportedGenerationMethods": ["generateContent"],
+                }],
+            })
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+            available = await main.GeminiClient(settings(), http).list_models()
+
+        self.assertEqual(available[0]["id"], "gemini-3.8-flash")
+        self.assertIn("generateContent", available[0]["methods"])
+        self.assertEqual(requests[0].url.path, "/v1beta/models")
+        self.assertEqual(requests[0].headers["x-goog-api-key"], "test-key")
+
+    async def test_unavailable_generation_model_has_actionable_error(self) -> None:
+        async def handler(_: httpx.Request) -> httpx.Response:
+            return httpx.Response(404, json={"error": {"status": "NOT_FOUND"}})
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+            client = main.GeminiClient(settings(), http)
+            with self.assertRaises(main.PipelineError) as error:
+                await client._post("models/gemini-test:generateContent", {}, "analysis")
+
+        self.assertEqual(error.exception.code, "MODEL_NOT_AVAILABLE")
+        self.assertIn("/api/models", error.exception.message)
 
     async def test_transcription_sends_audio_with_server_key(self) -> None:
         requests = []

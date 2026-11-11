@@ -67,6 +67,10 @@ def _env(name: str, default: str = "") -> str:
     return os.environ.get(name, default).strip()
 
 
+def _model_id(value: str) -> str:
+    return value.strip().removeprefix("models/")
+
+
 def _env_num(name: str, default: Any, cast: Any) -> Any:
     raw = _env(name)
     if not raw:
@@ -167,8 +171,8 @@ class Settings:
     def from_env(cls) -> "Settings":
         return cls(
             gemini_api_key=_env("GEMINI_API_KEY"),
-            gemini_model=_env("GEMINI_MODEL", "gemini-3.8-flash"),
-            gemini_tts_model=_env("GEMINI_TTS_MODEL", "gemini-3.8-flash-tts"),
+            gemini_model=_model_id(_env("GEMINI_MODEL", "gemini-3.8-flash")),
+            gemini_tts_model=_model_id(_env("GEMINI_TTS_MODEL", "gemini-3.8-flash-tts")),
             gemini_tts_voice=_env("GEMINI_TTS_VOICE", "Kore"),
             gemini_timeout=float(_env_num("GEMINI_TIMEOUT_S", 90.0, float)),
             max_upload_bytes=max(1, int(_env_num("MAX_UPLOAD_MB", 8, int))) * 1024 * 1024,
@@ -511,6 +515,16 @@ class GeminiClient:
                 code = str(body.get("error", {}).get("status", f"HTTP_{response.status_code}"))
             except (ValueError, AttributeError):
                 message, code = "", f"HTTP_{response.status_code}"
+            if response.status_code == 404 or code in ("NOT_FOUND", "MODEL_NOT_FOUND"):
+                model_name = self.s.gemini_tts_model if stage == "tts" else self.s.gemini_model
+                raise PipelineError(
+                    stage,
+                    "MODEL_NOT_AVAILABLE",
+                    f"Model '{model_name}' was not found or is not available to this API key/project. "
+                    "Open /api/models to see models enabled for this key, then set GEMINI_MODEL or "
+                    "GEMINI_TTS_MODEL to an available model. Use the model ID, not the Google Cloud project ID.",
+                    400,
+                )
             status = response.status_code if response.status_code in (400, 413, 429) else 502
             raise PipelineError(stage, code, message or f"Gemini API returned HTTP {response.status_code}.", status)
         try:
@@ -520,6 +534,54 @@ class GeminiClient:
         if not isinstance(body, dict):
             raise PipelineError(stage, "BAD_GEMINI_RESPONSE", "Gemini returned an unexpected response.", 502)
         return body
+
+    async def list_models(self) -> list[dict[str, Any]]:
+        models: list[dict[str, Any]] = []
+        page_token = ""
+        for _ in range(10):
+            params = {"pageSize": "100"}
+            if page_token:
+                params["pageToken"] = page_token
+            try:
+                response = await self._http.get(
+                    f"{self.API}/models",
+                    params=params,
+                    headers=self._headers("models"),
+                    timeout=httpx.Timeout(self.s.gemini_timeout, connect=10.0),
+                )
+            except httpx.HTTPError as exc:
+                raise PipelineError("models", "GEMINI_UNREACHABLE", f"Could not reach Gemini: {exc.__class__.__name__}.", 502) from exc
+            if response.status_code != 200:
+                try:
+                    body = response.json()
+                    message = str(body.get("error", {}).get("message", ""))
+                    code = str(body.get("error", {}).get("status", f"HTTP_{response.status_code}"))
+                except (ValueError, AttributeError):
+                    message, code = "", f"HTTP_{response.status_code}"
+                status = response.status_code if response.status_code in (400, 403, 429) else 502
+                raise PipelineError("models", code, message or f"Gemini API returned HTTP {response.status_code}.", status)
+            try:
+                body = response.json()
+                page = body.get("models", [])
+                if not isinstance(page, list):
+                    raise ValueError("models is not a list")
+                for item in page:
+                    if not isinstance(item, dict):
+                        continue
+                    model_id = _model_id(str(item.get("baseModelId") or item.get("name") or ""))
+                    if model_id:
+                        methods = item.get("supportedGenerationMethods", [])
+                        models.append({
+                            "id": model_id,
+                            "display_name": str(item.get("displayName") or model_id),
+                            "methods": methods if isinstance(methods, list) else [],
+                        })
+                page_token = str(body.get("nextPageToken") or "")
+            except (ValueError, TypeError, AttributeError) as exc:
+                raise PipelineError("models", "BAD_GEMINI_RESPONSE", "Gemini returned an invalid model list.", 502) from exc
+            if not page_token:
+                return models
+        raise PipelineError("models", "MODEL_LIST_TOO_LARGE", "Gemini's model list exceeded the supported page limit.", 502)
 
     @staticmethod
     def _candidate_text(body: dict[str, Any]) -> str:
@@ -616,9 +678,19 @@ class GeminiClient:
             raise PipelineError("tts", "GEMINI_UNREACHABLE", f"Could not reach Gemini TTS: {exc.__class__.__name__}.", 502) from exc
         if response.status_code != 200:
             try:
-                message = str(response.json().get("error", {}).get("message", ""))
+                error = response.json().get("error", {})
+                message = str(error.get("message", ""))
+                code = str(error.get("status", ""))
             except (ValueError, AttributeError):
-                message = ""
+                message, code = "", ""
+            if response.status_code == 404 or code in ("NOT_FOUND", "MODEL_NOT_FOUND"):
+                raise PipelineError(
+                    "tts",
+                    "MODEL_NOT_AVAILABLE",
+                    f"TTS model '{self.s.gemini_tts_model}' was not found or is not available to this API key/project. "
+                    "Check the Gemini API model list for this key, then set GEMINI_TTS_MODEL to an available TTS model.",
+                    400,
+                )
             status = response.status_code if response.status_code in (400, 413, 429) else 502
             raise PipelineError("tts", f"GEMINI_TTS_HTTP_{response.status_code}", message or "Gemini speech generation failed.", status)
         try:
@@ -884,6 +956,18 @@ async def config(request: Request) -> dict[str, Any]:
         "limits": {"per_hour": s.rate_limit_per_hour, "daily_cap": s.daily_cap},
         "gemini_key_configured": bool(s.gemini_api_key),
         "max_audio_seconds": MAX_AUDIO_SECONDS,
+    }
+
+
+@app.get("/api/models")
+async def models(request: Request) -> dict[str, Any]:
+    """List Gemini models available to the configured key and flag generation support."""
+    svc = _svc(request)
+    available = await svc.gemini.list_models()
+    return {
+        "analysis_model": svc.settings.gemini_model,
+        "tts_model": svc.settings.gemini_tts_model,
+        "models": available,
     }
 
 

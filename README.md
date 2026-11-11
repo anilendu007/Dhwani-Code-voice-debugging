@@ -98,6 +98,7 @@ FastAPI's interactive docs are available at `/docs`.
 |---|---|
 | `GET /api/health` | Service and model configuration status; never returns keys |
 | `GET /api/config` | UI profiles and model names |
+| `GET /api/models` | Gemini models accessible to the configured key, including supported generation methods |
 | `POST /api/transcribe` | Audio to transcript |
 | `POST /api/analyze` | Transcript and editor context to structured diagnosis |
 | `POST /api/speak` | Text to WAV or SSE audio events |
@@ -105,6 +106,8 @@ FastAPI's interactive docs are available at `/docs`.
 | `WS /ws/debug` | Context, audio, and typed requests over WebSocket |
 
 `POST /api/debug` accepts multipart form fields `audio` or `transcript`, `profile`, `file_name`, `language`, `code`, `error_log`, optional `cursor_line`, and optional `speak_reply`.
+
+If a model is unavailable to the configured key, the API reports `MODEL_NOT_AVAILABLE`. Open `/api/models` on your running server and set `GEMINI_MODEL` and/or `GEMINI_TTS_MODEL` to a listed model that supports the needed operation. Use the model ID (for example `gemini-3.8-flash`), not the Google Cloud project ID. A `models/` resource-name prefix is accepted and removed automatically.
 
 ## Known limitations
 
