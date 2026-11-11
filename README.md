@@ -579,7 +579,6 @@ Inside `main.py`, in order: configuration and language profiles; errors; data mo
 | Who will use it | Students and developers who code and talk about code in Hinglish, Tanglish, Benglish or Hindi |
 | Gnani technology | Prisma v2.5 (Hinglish, Hindi, with vocabulary boosting from the user's code), Prisma v3.0 (Tanglish and Benglish romanised transcripts, with automatic fallback to v2.5), Timbre v2.5 (streamed speech). Reasoning by openai/gpt-oss-120b on Groq; Gnani's Evon v3.3 is open-weights and not on the API platform, and the reasoning step is built to switch to it by configuration |
 | Contribution | Solo project. Designed and built the backend, interface, prompts, language handling and deployment |
-| Award categories it fits | Mixed Vibes, Demo Day Drop, Solo Ninja |
 | Demo video | <https://youtu.be/i5sSHQD05Xw> |
 | Live app | <https://dhwani-code-voice-debugging.onrender.com> |
 
