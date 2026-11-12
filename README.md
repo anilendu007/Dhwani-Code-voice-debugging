@@ -15,8 +15,11 @@ Dhwani-Code is a voice debugging companion for Indian developers. Ask about code
 2. Accepts a spoken or typed question.
 3. Sends audio, code, error output, and the question to Gemini through the backend.
 4. Shows the diagnosis and suggested source line, and can speak the answer.
+5. Highlights syntax in pasted code; JavaScript snippets can be run in a time-limited browser worker.
 
 Gemini is used for speech-to-text, code analysis, and text-to-speech. The Gemini API key stays on the server.
+
+The JavaScript runner requires no API key and does not send source code to the backend. It runs in a browser worker with a three-second time limit and common network APIs disabled. It is not a native compiler and only runs JavaScript; C++, Python, and the other language selections are currently for editing and AI analysis.
 
 ## Logical bug analysis
 

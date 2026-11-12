@@ -88,11 +88,28 @@
   .t-s { color: var(--fix); }
   .t-n { color: #A8480A; }
   .t-c { color: #7882A8; font-style: italic; }
+  .t-f { color: #185DA8; }
 
   .pane { display: grid; grid-template-rows: auto minmax(0, 1fr); min-height: 0; }
   .pane[hidden], .code[hidden], .console pre[hidden], .console textarea[hidden] { display: none; }
   .pane-bar { display: flex; align-items: center; gap: 10px; padding: 8px 16px; border-bottom: 1px solid var(--line); font-size: 13.5px; color: var(--muted); }
+  .runner-hint { margin-left: auto; font-size: 12px; }
   .pane-bar select { border: 1px solid var(--line); background: var(--surface); border-radius: 3px; padding: 3px 8px; }
+  .editor-wrap { position: relative; min-height: 0; overflow: hidden; }
+  .editor-highlight, .editor-wrap textarea.paste {
+    position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; padding: 12px 16px;
+    border: 0; font: 400 13.5px/1.7 var(--mono); tab-size: 4; white-space: pre;
+  }
+  .editor-highlight { overflow: hidden; margin: 0; pointer-events: none; }
+  .editor-highlight code { font: inherit; }
+  .editor-wrap textarea.paste {
+    resize: none; overflow: auto; background: transparent; color: transparent;
+    -webkit-text-fill-color: transparent; caret-color: var(--ink);
+  }
+  .editor-wrap textarea.paste::selection { background: rgba(54, 65, 217, 0.22); }
+  .editor-wrap textarea.paste:placeholder-shown {
+    color: var(--muted); -webkit-text-fill-color: var(--muted);
+  }
   textarea.paste {
     width: 100%; height: 100%; resize: none; border: 0; padding: 12px 16px; background: transparent;
     font: 400 13.5px/1.7 var(--mono); tab-size: 4; white-space: pre; overflow: auto;
@@ -100,7 +117,10 @@
   textarea.paste:focus-visible { outline-offset: -2px; }
 
   .console { display: grid; grid-template-rows: auto minmax(0, 1fr); background: #F0F3FA; border-top: 1px solid var(--line); min-height: 0; }
-  .console-head { padding: 7px 16px; font-weight: 600; font-size: 13.5px; color: var(--muted); border-bottom: 1px solid var(--line); }
+  .console-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 5px 16px; font-weight: 600; font-size: 13.5px; color: var(--muted); border-bottom: 1px solid var(--line); }
+  .console-actions { display: flex; align-items: center; gap: 8px; }
+  .console-actions button { padding: 3px 9px; border: 1px solid var(--line); border-radius: 3px; background: var(--surface); color: var(--ink); cursor: pointer; font-size: 12px; }
+  .console-actions button:disabled { opacity: 0.5; cursor: wait; }
   .console pre { margin: 0; padding: 10px 16px 14px; overflow: auto; font: 400 12.5px/1.65 var(--mono); }
   .console .err { color: var(--fault); }
   .console textarea.paste { font-size: 12.5px; }
@@ -205,14 +225,25 @@
           <option>C++</option><option>C</option><option>Python</option><option>JavaScript</option>
           <option>TypeScript</option><option>Java</option><option>Go</option><option>Rust</option>
         </select>
+        <span id="runnerHint" class="runner-hint" aria-live="polite"></span>
       </div>
-      <textarea id="customCode" class="paste" spellcheck="false" aria-label="Your code" placeholder="Paste the code you are debugging."></textarea>
+      <div class="editor-wrap">
+        <pre id="customHighlight" class="editor-highlight" aria-hidden="true"><code></code></pre>
+        <textarea id="customCode" class="paste" spellcheck="false" aria-label="Your code" placeholder="Paste the code you are debugging."></textarea>
+      </div>
     </div>
 
     <div class="console">
-      <div class="console-head">Terminal</div>
+      <div class="console-head">
+        <span>Terminal</span>
+        <div class="console-actions">
+          <button id="consoleToggle" type="button" hidden>Show error context</button>
+          <button id="runJavaScript" type="button" hidden>Run JavaScript</button>
+        </div>
+      </div>
       <pre id="logView" aria-label="Error output"></pre>
       <textarea id="customLog" class="paste" spellcheck="false" hidden aria-label="Your error output" placeholder="Paste the error message or stack trace."></textarea>
+      <pre id="runOutput" aria-live="polite" hidden></pre>
     </div>
   </section>
 
@@ -378,8 +409,14 @@ const SAMPLES = [
 ];
 
 const KEYWORDS = {
-  cpp: new Set("int long double float char bool void const auto struct class return for while if else static new delete nullptr true false namespace using template typename".split(" ")),
-  python: new Set("def return for in while if elif else import from class None True False and or not print range len try except raise with as lambda".split(" ")),
+  cpp: new Set("int long double float char bool void const auto struct class return for while if else static new delete nullptr true false namespace using template typename public private protected virtual override include".split(" ")),
+  python: new Set("def return for in while if elif else import from class None True False and or not print range len try except raise with as lambda pass break continue self async await yield".split(" ")),
+  javascript: new Set("const let var function return for of in while if else switch case break continue class extends new this super try catch finally throw import export from default async await true false null undefined typeof instanceof".split(" ")),
+  typescript: new Set("const let var function return for of in while if else switch case break continue class extends new this super try catch finally throw import export from default async await true false null undefined typeof instanceof interface type enum implements public private readonly string number boolean void any unknown never".split(" ")),
+  c: new Set("int long double float char bool void const auto struct enum return for while if else static new delete NULL true false size_t unsigned signed short switch case break continue typedef".split(" ")),
+  java: new Set("abstract boolean break byte case catch char class continue default do double else enum extends final finally float for if implements import instanceof int interface long new package private protected public return short static super switch this throw throws try void while true false null var".split(" ")),
+  go: new Set("break case chan const continue default defer else fallthrough for func go goto if import interface map package range return select struct switch type var bool byte error int int64 string true false nil".split(" ")),
+  rust: new Set("as async await break const continue crate else enum extern false fn for if impl in let loop match mod move mut pub ref return self Self static struct super trait true type unsafe use where while".split(" ")),
 };
 const EXT = { "C++": "cpp", C: "c", Python: "py", JavaScript: "js", TypeScript: "ts", Java: "java", Go: "go", Rust: "rs" };
 const WRONG_SERVER = "This page is not being served by the Dhwani-Code backend. Stop any other server, run `python main.py`, and open http://127.0.0.1:8000 in the browser (do not open index.html directly or through Live Server).";
@@ -398,7 +435,7 @@ const reduceMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
 const state = {
   tab: 0, profile: "hinglish", cfg: null, busy: false, recording: false,
   fault: null, // { tab, line, suggested }
-  abort: null,
+  abort: null, consoleView: "errors", runWorker: null, runTimeout: 0,
 };
 
 /* ------------------------------------------------------------------ *
@@ -415,10 +452,47 @@ function highlight(line, hl) {
     if (m[1]) out += `<span class="t-c">${esc(m[1])}</span>`;
     else if (m[2]) out += `<span class="t-s">${esc(m[2])}</span>`;
     else if (m[3]) out += `<span class="t-n">${esc(m[3])}</span>`;
-    else out += KEYWORDS[hl].has(m[4]) ? `<span class="t-k">${esc(m[4])}</span>` : esc(m[4]);
+    else if ((KEYWORDS[hl] || new Set()).has(m[4])) out += `<span class="t-k">${esc(m[4])}</span>`;
+    else if (/^[A-Za-z_$][\w$]*$/.test(m[4]) && line.slice(re.lastIndex).trimStart().startsWith("(")) out += `<span class="t-f">${esc(m[4])}</span>`;
+    else out += esc(m[4]);
     last = re.lastIndex;
   }
   return out + esc(line.slice(last));
+}
+
+function highlightSource(source, language) {
+  const hl = ({ "C++": "cpp", C: "c", Python: "python", JavaScript: "javascript", TypeScript: "typescript", Java: "java", Go: "go", Rust: "rust" })[language];
+  if (!hl) return esc(source);
+  const keywordSet = KEYWORDS[hl] || new Set();
+  const tokenPattern = /\/\*[\s\S]*?\*\/|\/\/[^\n]*|#[^\n]*|`(?:\\.|[^`\\])*`|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|\b\d+(?:\.\d+)?\b|\b[A-Za-z_$][\w$]*\b/g;
+  let output = "", lastIndex = 0, match;
+  while ((match = tokenPattern.exec(source))) {
+    output += esc(source.slice(lastIndex, match.index));
+    const token = match[0];
+    if (token.startsWith("//") || token.startsWith("/*") || (hl === "python" && token.startsWith("#"))) {
+      output += `<span class="t-c">${esc(token)}</span>`;
+    } else if ((hl === "cpp" || hl === "c") && /^#[ \t]*(include|define|if|ifdef|ifndef|else|elif|endif|pragma|error|line)\b/.test(token)) {
+      output += `<span class="t-k">${esc(token)}</span>`;
+    } else if (/^["'`]/.test(token)) {
+      output += `<span class="t-s">${esc(token)}</span>`;
+    } else if (/^\d/.test(token)) {
+      output += `<span class="t-n">${esc(token)}</span>`;
+    } else if (keywordSet.has(token)) {
+      output += `<span class="t-k">${esc(token)}</span>`;
+    } else if (/^[A-Za-z_$][\w$]*$/.test(token) && /^\s*\(/.test(source.slice(tokenPattern.lastIndex))) {
+      output += `<span class="t-f">${esc(token)}</span>`;
+    } else {
+      output += esc(token);
+    }
+    lastIndex = tokenPattern.lastIndex;
+  }
+  output += esc(source.slice(lastIndex));
+  return output || " ";
+}
+
+function renderCustomHighlight() {
+  const code = $("#customCode");
+  $("#customHighlight code").innerHTML = highlightSource(code.value, $("#customLang").value);
 }
 
 function renderTabs() {
@@ -433,8 +507,24 @@ function renderEditor() {
   $("#codeView").hidden = custom;
   $("#customPane").hidden = !custom;
   $("#logView").hidden = custom;
-  $("#customLog").hidden = !custom;
-  if (custom) return;
+  if (custom) {
+    renderCustomHighlight();
+    const canRun = $("#customLang").value === "JavaScript";
+    if (!canRun) state.consoleView = "errors";
+    $("#runnerHint").textContent = canRun
+      ? "Runs in your browser; no API key needed."
+      : "Run is currently available for JavaScript only.";
+    $("#runJavaScript").hidden = !canRun;
+    $("#consoleToggle").hidden = !canRun;
+    $("#consoleToggle").textContent = state.consoleView === "output" ? "Show error context" : "Show run output";
+    $("#customLog").hidden = state.consoleView === "output" && canRun;
+    $("#runOutput").hidden = !(state.consoleView === "output" && canRun);
+    return;
+  }
+  $("#customLog").hidden = true;
+  $("#runOutput").hidden = true;
+  $("#runJavaScript").hidden = true;
+  $("#consoleToggle").hidden = true;
 
   const fault = state.fault && state.fault.tab === state.tab ? state.fault : null;
   const rows = [];
@@ -462,6 +552,7 @@ function renderEditor() {
 }
 
 function selectTab(i) {
+  if (state.runWorker) finishJavaScriptRun();
   state.tab = i;
   state.fault = null;
   renderTabs();
@@ -489,6 +580,130 @@ function getContext() {
   }
   return { file_name: t.file, language: t.lang, code: t.code, error_log: t.log };
 }
+
+function finishJavaScriptRun() {
+  clearTimeout(state.runTimeout);
+  if (state.runWorker) state.runWorker.terminate();
+  state.runWorker = null;
+  $("#runJavaScript").disabled = false;
+  $("#runJavaScript").textContent = "Run JavaScript";
+}
+
+function runJavaScript() {
+  if ($("#customLang").value !== "JavaScript") return;
+  finishJavaScriptRun();
+  state.consoleView = "output";
+  renderEditor();
+  const output = $("#runOutput");
+  output.classList.remove("err");
+  output.textContent = "";
+  const code = $("#customCode").value;
+  if (!code.trim()) {
+    output.textContent = "Enter JavaScript code to run.";
+    return;
+  }
+  if (!window.Worker || !window.Blob || !window.URL.createObjectURL) {
+    output.textContent = "This browser does not support the isolated JavaScript runner.";
+    return;
+  }
+
+  $("#runJavaScript").disabled = true;
+  $("#runJavaScript").textContent = "Running…";
+  const workerSource = `
+    const userCode = ${JSON.stringify(code)};
+    const sendResult = self.postMessage.bind(self);
+    const denyNetwork = () => { throw new Error("Network access is disabled in this runner."); };
+    for (const name of ["fetch", "XMLHttpRequest", "WebSocket", "EventSource", "WebTransport", "importScripts"]) {
+      try { Object.defineProperty(self, name, { value: denyNetwork, configurable: false, writable: false }); } catch {}
+    }
+    try { Object.defineProperty(self, "postMessage", { value: denyNetwork, configurable: false, writable: false }); } catch {}
+    const format = (value) => {
+      if (typeof value === "string") return value;
+      try { const json = JSON.stringify(value); return json === undefined ? String(value) : json; }
+      catch { return String(value); }
+    };
+    self.onmessage = async () => {
+      let outputCount = 0;
+      const report = (message) => {
+        if (outputCount >= 100) return;
+        outputCount++;
+        if (message.text && message.text.length > 2000) message.text = message.text.slice(0, 2000) + "…";
+        sendResult(message);
+      };
+      const localConsole = Object.fromEntries(["log", "info", "warn", "error"].map((level) => [
+        level, (...values) => report({ type: "log", level, text: values.map(format).join(" ") })
+      ]));
+      try {
+        await new Function("console", userCode)(localConsole);
+        sendResult({ type: "done" });
+      } catch (error) {
+        report({ type: "error", text: error && error.stack ? error.stack : String(error) });
+        sendResult({ type: "done" });
+      }
+    };
+  `;
+  const url = URL.createObjectURL(new Blob([workerSource], { type: "text/javascript" }));
+  try {
+    state.runWorker = new Worker(url);
+  } catch (error) {
+    URL.revokeObjectURL(url);
+    output.textContent = `Could not start the browser runner: ${error.message}`;
+    finishJavaScriptRun();
+    return;
+  }
+  URL.revokeObjectURL(url);
+
+  let hasOutput = false;
+  const append = (text, isError) => {
+    if (hasOutput) output.textContent += "\n";
+    output.textContent += text;
+    hasOutput = true;
+    if (isError) output.classList.add("err");
+  };
+  const worker = state.runWorker;
+  worker.onmessage = (event) => {
+    if (event.data.type === "log") append(event.data.text, event.data.level === "error");
+    else if (event.data.type === "error") {
+      append(event.data.text, true);
+      finishJavaScriptRun();
+    } else if (event.data.type === "done") {
+      if (!hasOutput) output.textContent = "Execution finished with no console output.";
+      finishJavaScriptRun();
+    }
+  };
+  worker.onerror = (event) => {
+    append(event.message || "JavaScript runner failed.", true);
+    finishJavaScriptRun();
+  };
+  state.runTimeout = setTimeout(() => {
+    append("Execution stopped: time limit exceeded (3 seconds).", true);
+    finishJavaScriptRun();
+  }, 3000);
+  worker.postMessage({ type: "run" });
+}
+
+$("#customCode").addEventListener("input", () => {
+  if (state.runWorker) finishJavaScriptRun();
+  renderCustomHighlight();
+});
+$("#customCode").addEventListener("scroll", (event) => {
+  const highlightLayer = $("#customHighlight");
+  highlightLayer.scrollTop = event.target.scrollTop;
+  highlightLayer.scrollLeft = event.target.scrollLeft;
+});
+$("#customCode").addEventListener("keydown", (event) => {
+  if (event.key !== "Tab") return;
+  event.preventDefault();
+  const input = event.target;
+  const start = input.selectionStart, end = input.selectionEnd;
+  input.setRangeText("    ", start, end, "end");
+  input.dispatchEvent(new Event("input", { bubbles: true }));
+});
+$("#runJavaScript").addEventListener("click", runJavaScript);
+$("#consoleToggle").addEventListener("click", () => {
+  state.consoleView = state.consoleView === "output" ? "errors" : "output";
+  renderEditor();
+});
 
 /* ------------------------------------------------------------------ *
  * Small UI helpers
@@ -946,7 +1161,12 @@ renderEditor();
 resetResults();
 setMicState();
 loadConfig();
-$("#customLang").addEventListener("change", resetResults);
+$("#customLang").addEventListener("change", () => {
+  if (state.runWorker) finishJavaScriptRun();
+  state.consoleView = "errors";
+  renderEditor();
+  resetResults();
+});
 </script>
 </body>
 </html>
