@@ -85,12 +85,14 @@ Restart the server after changing `.env`. Never put the key in `index.html`, a U
 
 ## Deploying
 
-For Render, create a Python web service with:
+This repository includes a Render Blueprint in [`render.yaml`](./render.yaml). To deploy it, connect this Git repository to Render and create a Blueprint instance. Render will install the requirements and run Uvicorn bound to `0.0.0.0` on Render's assigned `$PORT`. When prompted, add `GEMINI_API_KEY` in Render's environment settings; do not put the key in the repository.
+
+For an existing Render web service, deploy the latest commit from this repository's branch and set `GEMINI_API_KEY` in **Dashboard → Environment**. Confirm the service uses this repository's root directory and the following commands:
 
 - Build command: `pip install -r requirements.txt`
 - Start command: `uvicorn main:app --host 0.0.0.0 --port $PORT`
 
-Add `GEMINI_API_KEY` and any optional settings in the service's environment dashboard. Use an actual Gemini API key there; do not commit it.
+After deployment, `/api/health` should report `gemini_key_configured: true` and Gemini model IDs, while `/api/models` should return the models accessible to that key. If `/api/models` returns 404 or health reports another provider, the Render service is still running an older deployment or the wrong repository/branch.
 
 ## API
 
