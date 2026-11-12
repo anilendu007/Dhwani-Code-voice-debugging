@@ -15,11 +15,11 @@ Dhwani-Code is a voice debugging companion for Indian developers. Ask about code
 2. Accepts a spoken or typed question.
 3. Sends audio, code, error output, and the question to Gemini through the backend.
 4. Shows the diagnosis and suggested source line, and can speak the answer.
-5. Highlights syntax in pasted code; JavaScript snippets can be run in a time-limited browser worker.
+5. Highlights pasted code and compiles/runs C++, C, Python, JavaScript, TypeScript, Java, Go, and Rust using Judge0's isolated online execution service.
 
 Gemini is used for speech-to-text, code analysis, and text-to-speech. The Gemini API key stays on the server.
 
-The JavaScript runner requires no API key and does not send source code to the backend. It runs in a browser worker with a three-second time limit and common network APIs disabled. It is not a native compiler and only runs JavaScript; C++, Python, and the other language selections are currently for editing and AI analysis.
+Online compilation is separate from Gemini and requires a Judge0 CE key. The browser sends source code and optional standard input to this app's backend; the backend sends them to Judge0, which compiles and executes the program in its sandbox. The compiler key is server-side and never sent to the browser. The app applies runtime, memory, source-size, and input-size limits.
 
 ## Logical bug analysis
 
@@ -76,6 +76,8 @@ Open <http://127.0.0.1:8000>. The app must be served by FastAPI; opening `index.
 | `GEMINI_TTS_MODEL` | `gemini-3.8-flash-tts` | Gemini speech-generation model available to your API key |
 | `GEMINI_TTS_VOICE` | `Kore` | Gemini TTS voice |
 | `GEMINI_TIMEOUT_S` | `90` | Request timeout |
+| `JUDGE0_API_KEY` | unset | Required server-side Judge0 CE/RapidAPI key for online code execution |
+| `JUDGE0_API_URL` | `https://judge0-ce.p.rapidapi.com` | Judge0 CE API base URL |
 | `MAX_UPLOAD_MB` | `8` | Maximum audio upload size |
 | `CORS_ORIGINS` | `*` | Comma-separated allowed origins |
 | `RATE_LIMIT_PER_HOUR` | `8` | Requests per visitor per hour; `0` disables it |
@@ -88,9 +90,9 @@ Restart the server after changing `.env`. Never put the key in `index.html`, a U
 
 ## Deploying
 
-This repository includes a Render Blueprint in [`render.yaml`](./render.yaml). To deploy it, connect this Git repository to Render and create a Blueprint instance. Render will install the requirements and run Uvicorn bound to `0.0.0.0` on Render's assigned `$PORT`. When prompted, add `GEMINI_API_KEY` in Render's environment settings; do not put the key in the repository.
+This repository includes a Render Blueprint in [`render.yaml`](./render.yaml). To deploy it, connect this Git repository to Render and create a Blueprint instance. Render will install the requirements and run Uvicorn bound to `0.0.0.0` on Render's assigned `$PORT`. When prompted, add `GEMINI_API_KEY` and `JUDGE0_API_KEY` in Render's environment settings; do not put either key in the repository.
 
-For an existing Render web service, deploy the latest commit from this repository's branch and set `GEMINI_API_KEY` in **Dashboard → Environment**. Confirm the service uses this repository's root directory and the following commands:
+For an existing Render web service, deploy the latest commit from this repository's branch and set both keys in **Dashboard → Environment**. Create a Judge0 CE key through [Judge0's RapidAPI listing](https://rapidapi.com/judge0-official/api/judge0-ce); its availability and quota depend on the current plan. Keep `JUDGE0_API_URL` at its default for RapidAPI. Confirm the service uses this repository's root directory and the following commands:
 
 - Build command: `pip install -r requirements.txt`
 - Start command: `uvicorn main:app --host 0.0.0.0 --port $PORT`
@@ -106,6 +108,7 @@ FastAPI's interactive docs are available at `/docs`.
 | `GET /api/health` | Service and model configuration status; never returns keys |
 | `GET /api/config` | UI profiles and model names |
 | `GET /api/models` | Gemini models accessible to the configured key, including supported generation methods |
+| `POST /api/run` | Compile and run one of the supported languages in Judge0 |
 | `POST /api/transcribe` | Audio to transcript |
 | `POST /api/analyze` | Transcript and editor context to structured diagnosis |
 | `POST /api/speak` | Text to WAV or SSE audio events |
@@ -114,6 +117,8 @@ FastAPI's interactive docs are available at `/docs`.
 
 `POST /api/debug` accepts multipart form fields `audio` or `transcript`, `profile`, `file_name`, `language`, `code`, `error_log`, optional `cursor_line`, and optional `speak_reply`.
 
+`POST /api/run` accepts JSON fields `language`, `code`, and optional `stdin`. Source code and standard input are sent to Judge0 for execution; do not include credentials or private data in them.
+
 If a model is unavailable to the configured key, the API reports `MODEL_NOT_AVAILABLE`. Open `/api/models` on your running server and set `GEMINI_MODEL` and/or `GEMINI_TTS_MODEL` to a listed model that supports the needed operation. Use the model ID (for example `gemini-3.8-flash`), not the Google Cloud project ID. A `models/` resource-name prefix is accepted and removed automatically.
 
 ## Known limitations
@@ -121,10 +126,11 @@ If a model is unavailable to the configured key, the API reports `MODEL_NOT_AVAI
 - The suggested fix is generated by a model; verify it and run your tests before using it.
 - Responses depend on the context provided. The current UI is a mock editor and does not automatically read a real IDE's files or diagnostics.
 - Each question is independent; the model has no conversation memory.
+- Online compilation requires a reachable Judge0 instance and is subject to that service's quota and availability. Programs run with a short CPU/wall-time limit and a 128 MB memory limit.
 - Gemini TTS is generated as a complete response before the browser starts playback, rather than streamed as it is generated.
 - The rate limiter is held in memory and resets when the process restarts. It is not a substitute for authentication or persistent quota controls.
 - Gemini API access, available models, quotas, and pricing depend on your Google account and current API configuration.
-- Audio, transcripts, code, and error output are sent to Google Gemini for processing. Do not send secrets or proprietary code unless you are comfortable with that.
+- Audio, transcripts, code, and error output used for AI debugging are sent to Google Gemini; code and stdin submitted to the online compiler are sent to Judge0. Do not send secrets or proprietary code unless you are comfortable with those services receiving it.
 
 ## Tests
 
@@ -134,12 +140,12 @@ Run the unit tests from the project root:
 python -m unittest discover -s tests -v
 ```
 
-The tests mock Gemini's HTTP responses and do not require a key or make external calls.
+The tests mock Gemini and Judge0 HTTP responses; they do not require keys or make external calls.
 
 ## Project files
 
-- `main.py` — Gemini client, FastAPI routes, prompt, and pipeline.
-- `index.html` — mock editor, recorder, and audio player.
+- `main.py` — Gemini and Judge0 clients, FastAPI routes, prompt, and pipeline.
+- `index.html` — syntax-highlighted editor, compiler controls, recorder, and audio player.
 - `.env.example` — local environment template.
 - `settings-template.txt` — deploy settings reference.
 - `requirements.txt` — Python dependencies.

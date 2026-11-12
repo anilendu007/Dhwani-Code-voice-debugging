@@ -83,6 +83,27 @@ def _env_num(name: str, default: Any, cast: Any) -> Any:
 
 
 _TTS_RATES = (8000, 16000, 22050, 24000, 44100, 48000)
+JUDGE0_DEFAULT_URL = "https://judge0-ce.p.rapidapi.com"
+JUDGE0_LANGUAGE_IDS = {
+    "C++": 105,
+    "C": 103,
+    "Python": 113,
+    "JavaScript": 102,
+    "TypeScript": 101,
+    "Java": 91,
+    "Go": 107,
+    "Rust": 108,
+}
+JUDGE0_FILENAMES = {
+    "C++": "main.cpp",
+    "C": "main.c",
+    "Python": "main.py",
+    "JavaScript": "main.js",
+    "TypeScript": "main.ts",
+    "Java": "Main.java",
+    "Go": "main.go",
+    "Rust": "main.rs",
+}
 
 
 @dataclass(frozen=True)
@@ -161,6 +182,8 @@ class Settings:
     gemini_tts_model: str
     gemini_tts_voice: str
     gemini_timeout: float
+    judge0_api_key: str
+    judge0_api_url: str
     max_upload_bytes: int
     cors_origins: list[str]
     rate_limit_per_hour: int
@@ -175,6 +198,8 @@ class Settings:
             gemini_tts_model=_model_id(_env("GEMINI_TTS_MODEL", "gemini-3.8-flash-tts")),
             gemini_tts_voice=_env("GEMINI_TTS_VOICE", "Kore"),
             gemini_timeout=float(_env_num("GEMINI_TIMEOUT_S", 90.0, float)),
+            judge0_api_key=_env("JUDGE0_API_KEY"),
+            judge0_api_url=_env("JUDGE0_API_URL", JUDGE0_DEFAULT_URL).rstrip("/"),
             max_upload_bytes=max(1, int(_env_num("MAX_UPLOAD_MB", 8, int))) * 1024 * 1024,
             cors_origins=[o.strip() for o in _env("CORS_ORIGINS", "*").split(",") if o.strip()],
             rate_limit_per_hour=max(0, int(_env_num("RATE_LIMIT_PER_HOUR", 8, int))),
@@ -189,6 +214,10 @@ class Settings:
     @property
     def reasoning_label(self) -> str:
         return self.gemini_model
+
+    @property
+    def compiler_configured(self) -> bool:
+        return bool(self.judge0_api_key or self.judge0_api_url != JUDGE0_DEFAULT_URL)
 
 # ===========================================================================
 # 2. Errors
@@ -260,6 +289,19 @@ class SpeakRequest(BaseModel):
     text: str = Field(..., min_length=1, max_length=600)
     profile: str = "hinglish"
     format: str = Field("sse", pattern="^(sse|wav)$")
+
+
+class RunRequest(BaseModel):
+    language: str = Field(..., min_length=1, max_length=20)
+    code: str = Field(..., min_length=1, max_length=50_000)
+    stdin: str = Field("", max_length=10_000)
+
+    @field_validator("language")
+    @classmethod
+    def _supported_language(cls, value: str) -> str:
+        if value not in JUDGE0_LANGUAGE_IDS:
+            raise ValueError(f"Unsupported compiler language: {value}")
+        return value
 
 
 @dataclass
@@ -773,6 +815,185 @@ class GeminiClient:
         return pcm, sample_rate, wav_data
 
 
+class Judge0Client:
+    """Submit single-file programs to Judge0's isolated compiler service."""
+
+    def __init__(self, settings: Settings, http: httpx.AsyncClient):
+        self.s, self._http = settings, http
+
+    def _headers(self) -> dict[str, str]:
+        target = urllib.parse.urlsplit(self.s.judge0_api_url)
+        local_http = target.scheme == "http" and target.hostname in ("localhost", "127.0.0.1", "::1")
+        if (
+            not target.hostname
+            or (target.scheme != "https" and not local_http)
+            or target.username
+            or target.password
+            or target.query
+            or target.fragment
+        ):
+            raise PipelineError(
+                "compiler", "INVALID_COMPILER_URL",
+                "JUDGE0_API_URL must be an HTTPS URL (HTTP is allowed only for a local Judge0 instance).", 500,
+            )
+        if self.s.judge0_api_key:
+            if self.s.judge0_api_url == JUDGE0_DEFAULT_URL:
+                return {
+                    "X-RapidAPI-Key": self.s.judge0_api_key,
+                    "X-RapidAPI-Host": "judge0-ce.p.rapidapi.com",
+                }
+            return {"X-Auth-Token": self.s.judge0_api_key}
+        if not self.s.compiler_configured:
+            raise PipelineError(
+                "compiler",
+                "COMPILER_NOT_CONFIGURED",
+                "Online compilation is not configured. Add JUDGE0_API_KEY to the Render environment.",
+                503,
+            )
+        return {}
+
+    @staticmethod
+    def _text(value: Any) -> str:
+        if not isinstance(value, str):
+            return ""
+        if len(value) > 30_000:
+            return value[:30_000] + "\n[output truncated]"
+        return value
+
+    @staticmethod
+    def _check_response(response: httpx.Response) -> None:
+        if response.status_code in (200, 201):
+            return
+        message = ""
+        try:
+            body = response.json()
+            message = str(body.get("message") or body.get("error", {}).get("message") or "")
+        except (ValueError, AttributeError):
+            pass
+        if response.status_code in (401, 403):
+            raise PipelineError(
+                "compiler", "COMPILER_AUTH_FAILED",
+                "Judge0 rejected its API credentials. Check JUDGE0_API_KEY in the Render environment.", 502,
+            )
+        if response.status_code == 429:
+            raise PipelineError(
+                "compiler", "COMPILER_QUOTA_EXCEEDED",
+                "The online compiler quota or rate limit was reached. Try again later or check your Judge0 plan.", 429,
+            )
+        status = response.status_code if response.status_code in (400, 413, 422) else 502
+        raise PipelineError(
+            "compiler", "COMPILER_REQUEST_FAILED",
+            (message[:500] if message else f"Judge0 returned HTTP {response.status_code}."), status,
+        )
+
+    @staticmethod
+    def _json_result(response: httpx.Response) -> dict[str, Any]:
+        try:
+            result = response.json()
+        except ValueError as exc:
+            raise PipelineError("compiler", "BAD_COMPILER_RESPONSE", "Judge0 returned a non-JSON response.", 502) from exc
+        if not isinstance(result, dict):
+            raise PipelineError("compiler", "BAD_COMPILER_RESPONSE", "Judge0 returned an unexpected response.", 502)
+        return result
+
+    async def _poll_submission(self, token: str, headers: dict[str, str]) -> dict[str, Any]:
+        deadline = time.monotonic() + 20
+        for attempt in range(20):
+            await asyncio.sleep(min(0.4 + attempt * 0.15, 1.5))
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            try:
+                response = await self._http.get(
+                    f"{self.s.judge0_api_url}/submissions/{urllib.parse.quote(token, safe='')}",
+                    params={"base64_encoded": "false"},
+                    headers=headers,
+                    timeout=httpx.Timeout(min(8.0, remaining), connect=min(5.0, remaining)),
+                )
+            except httpx.TimeoutException as exc:
+                raise PipelineError(
+                    "compiler", "COMPILER_TIMEOUT", "The online compiler took too long to respond. Try again.", 504
+                ) from exc
+            except httpx.HTTPError as exc:
+                raise PipelineError(
+                    "compiler", "COMPILER_UNREACHABLE",
+                    f"Could not reach the online compiler: {exc.__class__.__name__}.", 502,
+                ) from exc
+            self._check_response(response)
+            result = self._json_result(response)
+            status = result.get("status")
+            if not isinstance(status, dict):
+                raise PipelineError("compiler", "BAD_COMPILER_RESPONSE", "Judge0 returned no execution status.", 502)
+            if status.get("id") not in (1, 2):
+                return result
+        raise PipelineError(
+            "compiler", "COMPILER_QUEUE_TIMEOUT",
+            "The compiler is still busy. Please run the program again in a moment.", 504,
+        )
+
+    async def run(self, request: RunRequest) -> dict[str, Any]:
+        language_id = JUDGE0_LANGUAGE_IDS[request.language]
+        payload = {
+            "source_code": request.code,
+            "language_id": language_id,
+            "stdin": request.stdin,
+            "cpu_time_limit": 2,
+            "wall_time_limit": 5,
+            "memory_limit": 128_000,
+        }
+        headers = self._headers()
+        endpoint = f"{self.s.judge0_api_url}/submissions"
+        timeout = httpx.Timeout(30.0, connect=8.0)
+        try:
+            response = await self._http.post(
+                endpoint,
+                params={"base64_encoded": "false", "wait": "false"},
+                headers=headers,
+                json=payload,
+                timeout=timeout,
+            )
+        except httpx.TimeoutException as exc:
+            raise PipelineError(
+                "compiler", "COMPILER_TIMEOUT", "The online compiler took too long to respond. Try again.", 504
+            ) from exc
+        except httpx.HTTPError as exc:
+            raise PipelineError(
+                "compiler", "COMPILER_UNREACHABLE", f"Could not reach the online compiler: {exc.__class__.__name__}.", 502
+            ) from exc
+
+        self._check_response(response)
+        result = self._json_result(response)
+        status = result.get("status")
+        if not isinstance(status, dict) or status.get("id") in (1, 2):
+            token = result.get("token")
+            if not isinstance(token, str) or not re.fullmatch(r"[A-Za-z0-9._-]{1,200}", token):
+                raise PipelineError("compiler", "BAD_COMPILER_RESPONSE", "Judge0 returned no usable submission token.", 502)
+            result = await self._poll_submission(token, headers)
+            status = result.get("status")
+        if not isinstance(status, dict):
+            raise PipelineError("compiler", "BAD_COMPILER_RESPONSE", "Judge0 returned no execution status.", 502)
+
+        compile_output = self._text(result.get("compile_output"))
+        stdout = self._text(result.get("stdout"))
+        stderr = self._text(result.get("stderr"))
+        message = self._text(result.get("message"))
+        status_id = status.get("id")
+        return {
+            "language": request.language,
+            "language_id": language_id,
+            "status": status.get("description", "Unknown"),
+            "status_id": status_id,
+            "exit_code": result.get("exit_code"),
+            "compile_output": compile_output,
+            "stdout": stdout,
+            "stderr": stderr,
+            "message": message,
+            "time": result.get("time"),
+            "memory": result.get("memory"),
+            "success": status_id == 3 and result.get("exit_code") == 0,
+        }
+
+
 # ===========================================================================
 # 8. Pipeline
 # ===========================================================================
@@ -826,6 +1047,7 @@ class Services:
         self.settings = settings
         self.http = http
         self.gemini = GeminiClient(settings, http)
+        self.compiler = Judge0Client(settings, http)
         self.limiter = RateLimiter(settings.rate_limit_per_hour, settings.daily_cap)
 
     @property
@@ -988,6 +1210,7 @@ async def health(request: Request) -> dict[str, Any]:
         "tts_model": s.gemini_tts_model,
         "reasoning": _svc(request).provider,
         "reasoning_label": s.reasoning_label,
+        "compiler_configured": s.compiler_configured,
     }
 
 
@@ -1004,6 +1227,7 @@ async def config(request: Request) -> dict[str, Any]:
         "reasoning_label": s.reasoning_label,
         "limits": {"per_hour": s.rate_limit_per_hour, "daily_cap": s.daily_cap},
         "gemini_key_configured": bool(s.gemini_api_key),
+        "compiler_configured": s.compiler_configured,
         "max_audio_seconds": MAX_AUDIO_SECONDS,
     }
 
@@ -1018,6 +1242,14 @@ async def models(request: Request) -> dict[str, Any]:
         "tts_model": svc.settings.gemini_tts_model,
         "models": available,
     }
+
+
+@app.post("/api/run")
+async def run_code(request: Request, body: RunRequest) -> dict[str, Any]:
+    """Compile and run one supported source file using the configured sandboxed Judge0 service."""
+    svc = _svc(request)
+    enforce_limits(svc, request)
+    return {"result": await svc.compiler.run(body)}
 
 
 # --- individual stages: useful for testing the Gemini services -------------

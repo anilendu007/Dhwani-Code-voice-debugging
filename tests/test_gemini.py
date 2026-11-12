@@ -18,6 +18,8 @@ def settings() -> main.Settings:
         gemini_tts_model="gemini-tts-test",
         gemini_tts_voice="Kore",
         gemini_timeout=10,
+        judge0_api_key="judge0-test-key",
+        judge0_api_url=main.JUDGE0_DEFAULT_URL,
         max_upload_bytes=1024 * 1024,
         cors_origins=["*"],
         rate_limit_per_hour=8,
@@ -133,6 +135,87 @@ class GeminiClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(error.exception.status, 503)
         self.assertIn("high demand", error.exception.message)
 
+    async def test_judge0_run_uses_supported_language_and_limits(self) -> None:
+        requests = []
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            return httpx.Response(200, json={
+                "status": {"id": 3, "description": "Accepted"},
+                "stdout": "42\n",
+                "stderr": "",
+                "compile_output": None,
+                "exit_code": 0,
+                "time": "0.01",
+                "memory": 1024,
+            })
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+            result = await main.Judge0Client(settings(), http).run(
+                main.RunRequest(language="JavaScript", code="console.log(42)", stdin="input\n")
+            )
+
+        self.assertEqual(result["stdout"], "42\n")
+        self.assertTrue(result["success"])
+        self.assertEqual(requests[0].url.path, "/submissions")
+        self.assertEqual(requests[0].url.params["wait"], "false")
+        self.assertEqual(requests[0].headers["x-rapidapi-key"], "judge0-test-key")
+        payload = json.loads(requests[0].content)
+        self.assertEqual(payload["language_id"], main.JUDGE0_LANGUAGE_IDS["JavaScript"])
+        self.assertEqual(payload["stdin"], "input\n")
+        self.assertEqual(payload["wall_time_limit"], 5)
+
+    async def test_judge0_polls_queued_submissions(self) -> None:
+        requests = []
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            if request.method == "POST":
+                return httpx.Response(201, json={"token": "submission-token"})
+            if len([item for item in requests if item.method == "GET"]) == 1:
+                return httpx.Response(200, json={"status": {"id": 2, "description": "Processing"}})
+            return httpx.Response(200, json={
+                "status": {"id": 3, "description": "Accepted"},
+                "stdout": "done",
+                "exit_code": 0,
+            })
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+            with patch.object(main.asyncio, "sleep", new_callable=AsyncMock):
+                result = await main.Judge0Client(settings(), http).run(
+                    main.RunRequest(language="Python", code="print('done')")
+                )
+
+        self.assertEqual(result["stdout"], "done")
+        self.assertEqual([request.method for request in requests], ["POST", "GET", "GET"])
+        self.assertIn("/submissions/submission-token", requests[1].url.path)
+
+    async def test_judge0_requires_configuration_and_rejects_unknown_language(self) -> None:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(lambda _: self.fail("unexpected request"))) as http:
+            client = main.Judge0Client(
+                main.Settings(
+                    gemini_api_key="test-key",
+                    gemini_model="gemini-test",
+                    gemini_tts_model="gemini-tts-test",
+                    gemini_tts_voice="Kore",
+                    gemini_timeout=10,
+                    judge0_api_key="",
+                    judge0_api_url=main.JUDGE0_DEFAULT_URL,
+                    max_upload_bytes=1024,
+                    cors_origins=["*"],
+                    rate_limit_per_hour=8,
+                    daily_cap=200,
+                    owner_key="",
+                ),
+                http,
+            )
+            with self.assertRaises(main.PipelineError) as error:
+                await client.run(main.RunRequest(language="Python", code="print(1)"))
+
+        self.assertEqual(error.exception.code, "COMPILER_NOT_CONFIGURED")
+        with self.assertRaises(ValueError):
+            main.RunRequest(language="Ruby", code="puts 1")
+
     async def test_transcription_sends_audio_with_server_key(self) -> None:
         requests = []
 
@@ -217,6 +300,8 @@ class GeminiClientTests(unittest.IsolatedAsyncioTestCase):
                     gemini_tts_model="gemini-tts-test",
                     gemini_tts_voice="Kore",
                     gemini_timeout=10,
+                    judge0_api_key="",
+                    judge0_api_url=main.JUDGE0_DEFAULT_URL,
                     max_upload_bytes=1024,
                     cors_origins=["*"],
                     rate_limit_per_hour=8,

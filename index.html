@@ -90,7 +90,7 @@
   .t-c { color: #7882A8; font-style: italic; }
   .t-f { color: #185DA8; }
 
-  .pane { display: grid; grid-template-rows: auto minmax(0, 1fr); min-height: 0; }
+  .pane { display: grid; grid-template-rows: auto minmax(0, 1fr) auto; min-height: 0; }
   .pane[hidden], .code[hidden], .console pre[hidden], .console textarea[hidden] { display: none; }
   .pane-bar { display: flex; align-items: center; gap: 10px; padding: 8px 16px; border-bottom: 1px solid var(--line); font-size: 13.5px; color: var(--muted); }
   .runner-hint { margin-left: auto; font-size: 12px; }
@@ -110,6 +110,8 @@
   .editor-wrap textarea.paste:placeholder-shown {
     color: var(--muted); -webkit-text-fill-color: var(--muted);
   }
+  .stdin-row { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 10px; padding: 6px 16px; border-top: 1px solid var(--line); font-size: 12.5px; color: var(--muted); }
+  .stdin-input { width: 100%; height: 40px; resize: vertical; border: 1px solid var(--line); border-radius: 3px; padding: 5px 8px; background: var(--surface); font: 12px/1.4 var(--mono); }
   textarea.paste {
     width: 100%; height: 100%; resize: none; border: 0; padding: 12px 16px; background: transparent;
     font: 400 13.5px/1.7 var(--mono); tab-size: 4; white-space: pre; overflow: auto;
@@ -229,7 +231,11 @@
       </div>
       <div class="editor-wrap">
         <pre id="customHighlight" class="editor-highlight" aria-hidden="true"><code></code></pre>
-        <textarea id="customCode" class="paste" spellcheck="false" aria-label="Your code" placeholder="Paste the code you are debugging."></textarea>
+        <textarea id="customCode" class="paste" maxlength="50000" spellcheck="false" aria-label="Your code" placeholder="Paste the code you are debugging."></textarea>
+      </div>
+      <div class="stdin-row">
+        <label for="compilerStdin">Program input</label>
+        <textarea id="compilerStdin" class="stdin-input" maxlength="10000" aria-label="Program input" placeholder="Optional standard input"></textarea>
       </div>
     </div>
 
@@ -238,7 +244,7 @@
         <span>Terminal</span>
         <div class="console-actions">
           <button id="consoleToggle" type="button" hidden>Show error context</button>
-          <button id="runJavaScript" type="button" hidden>Run JavaScript</button>
+          <button id="runCode" type="button" hidden>Run code</button>
         </div>
       </div>
       <pre id="logView" aria-label="Error output"></pre>
@@ -435,7 +441,7 @@ const reduceMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
 const state = {
   tab: 0, profile: "hinglish", cfg: null, busy: false, recording: false,
   fault: null, // { tab, line, suggested }
-  abort: null, consoleView: "errors", runWorker: null, runTimeout: 0,
+  abort: null, consoleView: "errors", compilerBusy: false, compilerAbort: null,
 };
 
 /* ------------------------------------------------------------------ *
@@ -509,12 +515,16 @@ function renderEditor() {
   $("#logView").hidden = custom;
   if (custom) {
     renderCustomHighlight();
-    const canRun = $("#customLang").value === "JavaScript";
+    const canRun = Object.hasOwn(EXT, $("#customLang").value);
     if (!canRun) state.consoleView = "errors";
     $("#runnerHint").textContent = canRun
-      ? "Runs in your browser; no API key needed."
-      : "Run is currently available for JavaScript only.";
-    $("#runJavaScript").hidden = !canRun;
+      ? state.cfg?.compiler_configured
+        ? "Sandboxed runs; code is sent to Judge0."
+        : "Add JUDGE0_API_KEY in Render to enable online runs."
+      : "No online runtime is available for this language.";
+    $("#runCode").hidden = !canRun;
+    $("#runCode").disabled = state.compilerBusy;
+    $("#runCode").textContent = state.compilerBusy ? "Running…" : "Run code";
     $("#consoleToggle").hidden = !canRun;
     $("#consoleToggle").textContent = state.consoleView === "output" ? "Show error context" : "Show run output";
     $("#customLog").hidden = state.consoleView === "output" && canRun;
@@ -523,7 +533,7 @@ function renderEditor() {
   }
   $("#customLog").hidden = true;
   $("#runOutput").hidden = true;
-  $("#runJavaScript").hidden = true;
+  $("#runCode").hidden = true;
   $("#consoleToggle").hidden = true;
 
   const fault = state.fault && state.fault.tab === state.tab ? state.fault : null;
@@ -552,7 +562,7 @@ function renderEditor() {
 }
 
 function selectTab(i) {
-  if (state.runWorker) finishJavaScriptRun();
+  if (state.compilerAbort) cancelCompilerRun();
   state.tab = i;
   state.fault = null;
   renderTabs();
@@ -581,110 +591,78 @@ function getContext() {
   return { file_name: t.file, language: t.lang, code: t.code, error_log: t.log };
 }
 
-function finishJavaScriptRun() {
-  clearTimeout(state.runTimeout);
-  if (state.runWorker) state.runWorker.terminate();
-  state.runWorker = null;
-  $("#runJavaScript").disabled = false;
-  $("#runJavaScript").textContent = "Run JavaScript";
+function cancelCompilerRun() {
+  if (state.compilerAbort) state.compilerAbort.abort();
+  state.compilerAbort = null;
+  state.compilerBusy = false;
+  $("#runCode").disabled = false;
+  $("#runCode").textContent = "Run code";
 }
 
-function runJavaScript() {
-  if ($("#customLang").value !== "JavaScript") return;
-  finishJavaScriptRun();
+function formatCompilerResult(result) {
+  const sections = [];
+  if (result.compile_output) sections.push(`Compiler output:\n${result.compile_output}`);
+  if (result.stdout) sections.push(`Program output:\n${result.stdout}`);
+  if (result.stderr) sections.push(`Error output:\n${result.stderr}`);
+  if (result.message) sections.push(`Details:\n${result.message}`);
+  sections.push(`Status: ${result.status}${result.exit_code == null ? "" : ` · exit code ${result.exit_code}`}`);
+  if (result.time != null) sections.push(`Time: ${result.time}s · Memory: ${result.memory ?? "—"} KB`);
+  return sections.join("\n\n");
+}
+
+async function runCode() {
+  if (!Object.hasOwn(EXT, $("#customLang").value)) return;
+  cancelCompilerRun();
   state.consoleView = "output";
   renderEditor();
   const output = $("#runOutput");
   output.classList.remove("err");
-  output.textContent = "";
   const code = $("#customCode").value;
   if (!code.trim()) {
-    output.textContent = "Enter JavaScript code to run.";
+    output.textContent = "Enter code to run.";
     return;
   }
-  if (!window.Worker || !window.Blob || !window.URL.createObjectURL) {
-    output.textContent = "This browser does not support the isolated JavaScript runner.";
+  if (code.length > 50_000 || $("#compilerStdin").value.length > 10_000) {
+    output.textContent = "Code is limited to 50,000 characters and program input to 10,000 characters.";
     return;
   }
 
-  $("#runJavaScript").disabled = true;
-  $("#runJavaScript").textContent = "Running…";
-  const workerSource = `
-    const userCode = ${JSON.stringify(code)};
-    const sendResult = self.postMessage.bind(self);
-    const denyNetwork = () => { throw new Error("Network access is disabled in this runner."); };
-    for (const name of ["fetch", "XMLHttpRequest", "WebSocket", "EventSource", "WebTransport", "importScripts"]) {
-      try { Object.defineProperty(self, name, { value: denyNetwork, configurable: false, writable: false }); } catch {}
-    }
-    try { Object.defineProperty(self, "postMessage", { value: denyNetwork, configurable: false, writable: false }); } catch {}
-    const format = (value) => {
-      if (typeof value === "string") return value;
-      try { const json = JSON.stringify(value); return json === undefined ? String(value) : json; }
-      catch { return String(value); }
-    };
-    self.onmessage = async () => {
-      let outputCount = 0;
-      const report = (message) => {
-        if (outputCount >= 100) return;
-        outputCount++;
-        if (message.text && message.text.length > 2000) message.text = message.text.slice(0, 2000) + "…";
-        sendResult(message);
-      };
-      const localConsole = Object.fromEntries(["log", "info", "warn", "error"].map((level) => [
-        level, (...values) => report({ type: "log", level, text: values.map(format).join(" ") })
-      ]));
-      try {
-        await new Function("console", userCode)(localConsole);
-        sendResult({ type: "done" });
-      } catch (error) {
-        report({ type: "error", text: error && error.stack ? error.stack : String(error) });
-        sendResult({ type: "done" });
-      }
-    };
-  `;
-  const url = URL.createObjectURL(new Blob([workerSource], { type: "text/javascript" }));
+  const controller = new AbortController();
+  state.compilerAbort = controller;
+  state.compilerBusy = true;
+  $("#runCode").disabled = true;
+  $("#runCode").textContent = "Running…";
+  renderEditor();
+  output.textContent = "Sending code to the sandboxed online compiler…";
+  const timeout = setTimeout(() => controller.abort(), 35_000);
   try {
-    state.runWorker = new Worker(url);
+    const response = await fetch("/api/run", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authHeaders() },
+      body: JSON.stringify({ language: $("#customLang").value, code, stdin: $("#compilerStdin").value }),
+      signal: controller.signal,
+    });
+    const body = await response.json().catch(() => null);
+    if (!response.ok) throw new Error(body?.error?.message || `Compiler service returned ${response.status}.`);
+    output.textContent = formatCompilerResult(body.result);
+    output.classList.toggle("err", !body.result.success);
   } catch (error) {
-    URL.revokeObjectURL(url);
-    output.textContent = `Could not start the browser runner: ${error.message}`;
-    finishJavaScriptRun();
-    return;
+    output.classList.add("err");
+    output.textContent = error.name === "AbortError"
+      ? "The compiler request timed out or was cancelled."
+      : error.message || "Could not reach the online compiler.";
+  } finally {
+    clearTimeout(timeout);
+    if (state.compilerAbort === controller) cancelCompilerRun();
   }
-  URL.revokeObjectURL(url);
-
-  let hasOutput = false;
-  const append = (text, isError) => {
-    if (hasOutput) output.textContent += "\n";
-    output.textContent += text;
-    hasOutput = true;
-    if (isError) output.classList.add("err");
-  };
-  const worker = state.runWorker;
-  worker.onmessage = (event) => {
-    if (event.data.type === "log") append(event.data.text, event.data.level === "error");
-    else if (event.data.type === "error") {
-      append(event.data.text, true);
-      finishJavaScriptRun();
-    } else if (event.data.type === "done") {
-      if (!hasOutput) output.textContent = "Execution finished with no console output.";
-      finishJavaScriptRun();
-    }
-  };
-  worker.onerror = (event) => {
-    append(event.message || "JavaScript runner failed.", true);
-    finishJavaScriptRun();
-  };
-  state.runTimeout = setTimeout(() => {
-    append("Execution stopped: time limit exceeded (3 seconds).", true);
-    finishJavaScriptRun();
-  }, 3000);
-  worker.postMessage({ type: "run" });
 }
 
 $("#customCode").addEventListener("input", () => {
-  if (state.runWorker) finishJavaScriptRun();
+  if (state.compilerAbort) cancelCompilerRun();
   renderCustomHighlight();
+});
+$("#compilerStdin").addEventListener("input", () => {
+  if (state.compilerAbort) cancelCompilerRun();
 });
 $("#customCode").addEventListener("scroll", (event) => {
   const highlightLayer = $("#customHighlight");
@@ -699,7 +677,7 @@ $("#customCode").addEventListener("keydown", (event) => {
   input.setRangeText("    ", start, end, "end");
   input.dispatchEvent(new Event("input", { bubbles: true }));
 });
-$("#runJavaScript").addEventListener("click", runJavaScript);
+$("#runCode").addEventListener("click", runCode);
 $("#consoleToggle").addEventListener("click", () => {
   state.consoleView = state.consoleView === "output" ? "errors" : "output";
   renderEditor();
@@ -784,6 +762,7 @@ async function loadConfig() {
       { name: `Gemini code · ${pretty(cfg.analysis_model)}`, cls: keyOk ? "ok" : "bad", tip: keyOk ? "Logical bug analysis" : "GEMINI_API_KEY is not set" },
       { name: `Gemini voice · ${pretty(cfg.tts_model)}`, cls: keyOk ? "ok" : "bad", tip: keyOk ? "Speech synthesis" : "GEMINI_API_KEY is not set" },
     ].map((e) => `<li title="${esc(e.tip)}"><span class="dot ${e.cls}"></span>${esc(e.name)}</li>`).join("");
+    renderEditor();
 
     $("#langs").innerHTML = cfg.profiles.map((p) =>
       `<label><input type="radio" name="lang" value="${p.key}"${p.key === state.profile ? " checked" : ""}><span>${esc(p.label)}</span></label>`
@@ -791,7 +770,8 @@ async function loadConfig() {
     if (!keyOk) showAlert("GEMINI_API_KEY is not set. Add it to your .env file and restart the server. Gemini is required for voice and code analysis.");
     updateHints();
   } catch (err) {
-    state.cfg = { profiles: [{ key: "hinglish", label: "Hinglish" }, { key: "hindi", label: "Hindi" }, { key: "tanglish", label: "Tamil" }] };
+    state.cfg = { profiles: [{ key: "hinglish", label: "Hinglish" }, { key: "hindi", label: "Hindi" }, { key: "tanglish", label: "Tamil" }], compiler_configured: false };
+    renderEditor();
     $("#langs").innerHTML = state.cfg.profiles.map((p) =>
       `<label><input type="radio" name="lang" value="${p.key}"${p.key === state.profile ? " checked" : ""}><span>${esc(p.label)}</span></label>`
     ).join("");
@@ -1162,7 +1142,7 @@ resetResults();
 setMicState();
 loadConfig();
 $("#customLang").addEventListener("change", () => {
-  if (state.runWorker) finishJavaScriptRun();
+  if (state.compilerAbort) cancelCompilerRun();
   state.consoleView = "errors";
   renderEditor();
   resetResults();
