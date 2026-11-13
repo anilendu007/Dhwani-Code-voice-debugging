@@ -1,7 +1,7 @@
 # Dhwani-Code backend. Python 3.10 or newer.
 fastapi>=0.115,<1.0
 uvicorn[standard]>=0.30      # ASGI server; [standard] brings in websockets support
-httpx>=0.27                  # async client for the Gemini API
+httpx>=0.27                  # async client for Prisma, Evon and Timbre
 python-multipart>=0.0.9      # multipart/form-data parsing for audio uploads
 pydantic>=2.7,<3.0
-python-dotenv>=1.0           # loads GEMINI_API_KEY and other settings from .env
+python-dotenv>=1.0           # loads GNANI_API_KEY etc. from .env
