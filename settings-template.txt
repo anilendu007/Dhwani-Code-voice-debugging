@@ -1,28 +1,30 @@
-# Dhwani-Code environment settings.
+# Dhwani-Code settings with Groq as the reasoning model.
 #
-# Local: copy .env.example to .env, add your key, and restart the server.
-# Render: add these variables in the service's Environment dashboard.
-# Never commit or share a file after a real API key has been added.
+# Render: open your service, then Environment, then add each line below as a variable
+#         (or use "Add from .env" and paste the lines). Save, and Render redeploys.
+# Local:  copy these lines into a file named .env next to main.py.
+#
+# Replace every <...> with your own value. Do not add comments after a value on the same line.
+# Never paste this file into chat or upload it to GitHub once it holds real keys.
 
-# One server-side key powers transcription, code analysis, and speech synthesis.
-GEMINI_API_KEY=<your Gemini API key>
-GEMINI_MODEL=gemini-3.8-flash
-GEMINI_TTS_MODEL=gemini-3.8-flash-tts
-GEMINI_TTS_VOICE=Kore
-GEMINI_TIMEOUT_S=90
+# Gnani: one key covers speech to text (Prisma) and text to speech (Timbre). Use your NEW key.
+GNANI_API_KEY=<your new Gnani key>
+GNANI_MAX_CONCURRENCY=1
+STT_MODEL=prisma-v2.5
+TTS_MODEL=timbre-v2.5
 
-# Optional Judge0 settings for the backend API only. The browser runner needs neither.
-JUDGE0_API_KEY=<your Judge0 API key or self-hosted auth token>
-JUDGE0_API_URL=https://judge0-ce.p.rapidapi.com
+# Reasoning: Groq, through its OpenAI-compatible endpoint.
+EVON_BASE_URL=https://api.groq.com/openai/v1
+# Your Groq key (it starts with gsk_).
+EVON_API_KEY=<your Groq key>
+# A model name that appears in YOUR Groq model list. The names change over time, so confirm this one exists.
+EVON_MODEL=llama-3.3-70b-versatile
+EVON_ENABLE_THINKING=false
+# Leave this empty: the page then shows the real model name instead of claiming Evon.
+REASONING_LABEL=
 
-# Protect public demos. Limits are in-memory and reset when the server restarts.
+# Protect your Gnani credits on a public link.
 RATE_LIMIT_PER_HOUR=8
 DAILY_CAP=200
-OWNER_KEY=<a long random secret>
-
-# Server
-HOST=127.0.0.1
-PORT=8000
-CORS_ORIGINS=*
-MAX_UPLOAD_MB=8
-LOG_LEVEL=INFO
+# Any long random string only you know. Open https://your-site/?owner=<this value> once to skip the limits yourself.
+OWNER_KEY=<a long random string>
