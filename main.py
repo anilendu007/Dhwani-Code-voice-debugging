@@ -1242,7 +1242,14 @@ async def index() -> Response:
     page = BASE_DIR / "index.html"
     if not page.exists():
         return JSONResponse({"error": "index.html not found next to main.py"}, status_code=404)
-    return FileResponse(page, media_type="text/html")
+    return FileResponse(
+        page,
+        media_type="text/html",
+        headers={
+            "Cross-Origin-Opener-Policy": "same-origin",
+            "Cross-Origin-Embedder-Policy": "require-corp",
+        },
+    )
 
 
 @app.get("/api/health")

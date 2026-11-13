@@ -58,6 +58,13 @@ def wav_bytes() -> bytes:
 
 
 class GeminiClientTests(unittest.IsolatedAsyncioTestCase):
+    def test_home_page_enables_cross_origin_isolation_for_browser_compiler(self) -> None:
+        with TestClient(main.app) as client:
+            response = client.get("/")
+
+        self.assertEqual(response.headers["cross-origin-opener-policy"], "same-origin")
+        self.assertEqual(response.headers["cross-origin-embedder-policy"], "require-corp")
+
     def test_health_and_config_report_gemini_without_exposing_key(self) -> None:
         with TestClient(main.app) as client:
             health = client.get("/api/health").json()

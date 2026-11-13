@@ -6,7 +6,7 @@
 <title>Dhwani-Code</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Mukta:wght@400;600;800&family=Spline+Sans+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Mukta:wght@400;600;800&family=Spline+Sans+Mono:wght@400;500&display=swap" rel="stylesheet" crossorigin="anonymous">
 <style>
   :root {
     --paper: #E8ECF4;
@@ -425,8 +425,12 @@ const KEYWORDS = {
   rust: new Set("as async await break const continue crate else enum extern false fn for if impl in let loop match mod move mut pub ref return self Self static struct super trait true type unsafe use where while".split(" ")),
 };
 const EXT = { "C++": "cpp", C: "c", Python: "py", JavaScript: "js", TypeScript: "ts", Java: "java", Go: "go", Rust: "rs" };
-const BROWSER_LANGUAGES = new Set(["Python", "JavaScript"]);
+const BROWSER_LANGUAGES = new Set(["C", "Python", "JavaScript", "TypeScript"]);
 const PYODIDE_VERSION = "v0.27.7";
+const TYPESCRIPT_VERSION = "5.8.3";
+const TYPESCRIPT_URL = `https://cdn.jsdelivr.net/npm/typescript@${TYPESCRIPT_VERSION}/lib/typescript.js`;
+const WASMER_SDK_URL = "https://cdn.jsdelivr.net/npm/@wasmer/sdk@0.19.1/dist/index.js";
+const CLANG_PACKAGE = "clang/clang@=0.160000.1";
 const WRONG_SERVER = "This page is not being served by the Dhwani-Code backend. Stop any other server, run `python main.py`, and open http://127.0.0.1:8000 in the browser (do not open index.html directly or through Live Server).";
 const OWNER = (() => {
   const q = new URLSearchParams(location.search).get("owner");
@@ -445,6 +449,8 @@ const state = {
   fault: null, // { tab, line, suggested }
   abort: null, consoleView: "errors", compilerBusy: false, compilerAbort: null,
 };
+let typescriptPromise;
+let wasmerPromise;
 
 /* ------------------------------------------------------------------ *
  * Editor rendering
@@ -522,8 +528,12 @@ function renderEditor() {
     $("#runnerHint").textContent = canRun
       ? language === "Python"
         ? "Runs in your browser; the Python runtime downloads on first use."
-        : "Runs locally in an isolated browser frame."
-      : "Browser runner currently supports Python and JavaScript.";
+        : language === "JavaScript"
+          ? "Runs locally in an isolated browser frame."
+          : language === "TypeScript"
+            ? "Transpiles in your browser (no type-checking or imports), then runs locally."
+            : "Compiles and runs in your browser; the C compiler downloads on first use."
+      : "Browser runner supports C, Python, JavaScript, and TypeScript.";
     $("#runCode").hidden = false;
     $("#runCode").disabled = state.compilerBusy || !canRun;
     $("#runCode").textContent = state.compilerBusy ? "Running…" : "Run code";
@@ -738,6 +748,148 @@ function runPythonInWorker(code, stdin, signal, onReady) {
   });
 }
 
+function loadTypeScriptCompiler() {
+  if (!typescriptPromise) {
+    typescriptPromise = new Promise((resolve, reject) => {
+      const script = document.createElement("script");
+      script.src = TYPESCRIPT_URL;
+      script.crossOrigin = "anonymous";
+      script.onload = () => window.ts
+        ? resolve(window.ts)
+        : reject(new Error("The TypeScript compiler loaded without exposing its API."));
+      script.onerror = () => reject(new Error("Could not download the TypeScript compiler from jsDelivr."));
+      document.head.append(script);
+    }).catch((error) => {
+      typescriptPromise = null;
+      throw error;
+    });
+  }
+  return typescriptPromise;
+}
+
+async function transpileTypeScript(code) {
+  const ts = await loadTypeScriptCompiler();
+  const sourceFile = ts.createSourceFile("main.ts", code, ts.ScriptTarget.Latest, true);
+  if (ts.isExternalModule(sourceFile)) {
+    throw new Error("TypeScript modules are not supported in the single-file browser runner. Remove import/export statements.");
+  }
+  const result = ts.transpileModule(code, {
+    fileName: "main.ts",
+    reportDiagnostics: true,
+    compilerOptions: {
+      target: ts.ScriptTarget.ES2022,
+      module: ts.ModuleKind.None,
+    },
+  });
+  const errors = (result.diagnostics || []).filter((diagnostic) => diagnostic.category === ts.DiagnosticCategory.Error);
+  if (errors.length) {
+    const messages = errors.map((diagnostic) => {
+      const position = diagnostic.file && diagnostic.start !== undefined
+        ? diagnostic.file.getLineAndCharacterOfPosition(diagnostic.start)
+        : null;
+      const location = position ? `Line ${position.line + 1}, column ${position.character + 1}: ` : "";
+      return `${location}TS${diagnostic.code}: ${ts.flattenDiagnosticMessageText(diagnostic.messageText, "\n")}`;
+    });
+    throw new Error(messages.join("\n"));
+  }
+  return result.outputText;
+}
+
+async function loadWasmer() {
+  if (!globalThis.crossOriginIsolated) {
+    throw new Error("The C runner needs a cross-origin-isolated page. Use the FastAPI app at its normal URL; static or file:// hosting will not work.");
+  }
+  if (!wasmerPromise) {
+    wasmerPromise = import(WASMER_SDK_URL).then(async ({ Wasmer }) => {
+      const wasmer = new Wasmer({ parallelism: 1, outputBytes: 30000 });
+      await wasmer.ready();
+      return wasmer;
+    }).catch((error) => {
+      wasmerPromise = null;
+      throw error;
+    });
+  }
+  return wasmerPromise;
+}
+
+async function runWasmerCommand(sandbox, command, args, stdin, timeoutMs, signal) {
+  const process = await sandbox.command(command, args).spawn({
+    stdin: "pipe",
+    stdout: "capture",
+    stderr: "capture",
+    timeoutMs,
+    outputBytes: 30000,
+  });
+  if (!process.stdin) {
+    throw new Error("The browser C compiler could not open standard input.");
+  }
+  let killPromise;
+  const kill = () => {
+    if (!killPromise) killPromise = process.kill();
+    return killPromise;
+  };
+  const abortProcess = () => { void kill().catch((error) => console.error("Could not stop the browser compiler process:", error)); };
+  if (signal.aborted) {
+    await kill();
+    throw new DOMException("Execution cancelled.", "AbortError");
+  }
+  signal.addEventListener("abort", abortProcess, { once: true });
+  try {
+    if (stdin) await process.stdin.write(stdin);
+    await process.stdin.close();
+    const result = await process.wait({ check: false });
+    if (signal.aborted) throw new DOMException("Execution cancelled.", "AbortError");
+    return result;
+  } finally {
+    signal.removeEventListener("abort", abortProcess);
+    if (signal.aborted) await kill();
+  }
+}
+
+async function runCInBrowser(code, stdin, signal, onProgress, onReady) {
+  const wasmer = await loadWasmer();
+  if (signal.aborted) throw new DOMException("Execution cancelled.", "AbortError");
+  const sandbox = await wasmer.sandboxes.create({
+    packages: [CLANG_PACKAGE],
+    env: { CCC_OVERRIDE_OPTIONS: "#^-resource-dir=/lib/clang/16" },
+    files: { "main.c": code },
+    signal,
+    onPackageProgress: (progress) => {
+      const download = progress.download;
+      if (progress.phase === "ready") {
+        onReady();
+      } else if (download.percent !== null) {
+        onProgress(`Downloading the C compiler: ${Math.round(download.percent)}%…`);
+      } else {
+        onProgress("Downloading the C compiler…");
+      }
+    },
+  });
+  try {
+    if (signal.aborted) throw new DOMException("Execution cancelled.", "AbortError");
+    onProgress("Compiling C code in your browser…");
+    const compilation = await runWasmerCommand(sandbox, "clang", ["main.c", "-o", "program.wasm"], "", 30_000, signal);
+    if (!compilation.ok) {
+      return {
+        stdout: compilation.stdout.text(),
+        stderr: compilation.stderr.text(),
+        exit_code: compilation.exitCode,
+      };
+    }
+    if (signal.aborted) throw new DOMException("Execution cancelled.", "AbortError");
+    const program = await sandbox.installPackage(await sandbox.fs.readFile("program.wasm"));
+    if (signal.aborted) throw new DOMException("Execution cancelled.", "AbortError");
+    const result = await runWasmerCommand(sandbox, program, [], stdin, 15_000, signal);
+    return {
+      stdout: result.stdout.text(),
+      stderr: result.stderr.text(),
+      exit_code: result.exitCode,
+    };
+  } finally {
+    await sandbox.close();
+  }
+}
+
 async function runCode() {
   const language = $("#customLang").value;
   if (!BROWSER_LANGUAGES.has(language)) return;
@@ -763,15 +915,31 @@ async function runCode() {
   output.textContent = language === "Python"
     ? "Starting the Python runtime in your browser. The first run downloads it; this can take a minute."
     : "Running JavaScript in an isolated browser frame…";
-  let timeout = setTimeout(() => controller.abort(), language === "Python" ? 120_000 : 10_000);
+  let timeout = setTimeout(() => controller.abort(), language === "Python" || language === "C" ? 180_000 : 10_000);
   try {
+    const stdin = $("#compilerStdin").value;
     const execute = language === "Python"
-      ? () => runPythonInWorker(code, $("#compilerStdin").value, controller.signal, () => {
+      ? () => runPythonInWorker(code, stdin, controller.signal, () => {
           clearTimeout(timeout);
           timeout = setTimeout(() => controller.abort(), 15_000);
           output.textContent = "Python runtime ready. Running your code…";
         })
-      : () => runJavaScriptInFrame(code, $("#compilerStdin").value, controller.signal);
+      : language === "TypeScript"
+        ? async () => {
+            output.textContent = "Downloading the TypeScript compiler and transpiling in your browser…";
+            const javascript = await transpileTypeScript(code);
+            output.textContent = "TypeScript transpiled. Running the generated JavaScript…";
+            return runJavaScriptInFrame(javascript, stdin, controller.signal);
+          }
+        : language === "C"
+          ? () => runCInBrowser(code, stdin, controller.signal, (message) => {
+              output.textContent = message;
+            }, () => {
+              clearTimeout(timeout);
+              timeout = setTimeout(() => controller.abort(), 45_000);
+              output.textContent = "C compiler ready. Compiling your code…";
+            })
+          : () => runJavaScriptInFrame(code, stdin, controller.signal);
     const result = await execute();
     output.textContent = formatBrowserResult(result);
     output.classList.toggle("err", result.exit_code !== 0);
