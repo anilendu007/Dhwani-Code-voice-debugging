@@ -225,7 +225,7 @@
         <label for="customLang">Language</label>
         <select id="customLang">
           <option>C++</option><option>C</option><option>Python</option><option>JavaScript</option>
-          <option>TypeScript</option><option>Java</option><option>Go</option><option>Rust</option>
+          <option>Java</option><option>Go</option><option>Rust</option>
         </select>
         <span id="runnerHint" class="runner-hint" aria-live="polite"></span>
       </div>
@@ -418,18 +418,16 @@ const KEYWORDS = {
   cpp: new Set("int long double float char bool void const auto struct class return for while if else static new delete nullptr true false namespace using template typename public private protected virtual override include".split(" ")),
   python: new Set("def return for in while if elif else import from class None True False and or not print range len try except raise with as lambda pass break continue self async await yield".split(" ")),
   javascript: new Set("const let var function return for of in while if else switch case break continue class extends new this super try catch finally throw import export from default async await true false null undefined typeof instanceof".split(" ")),
-  typescript: new Set("const let var function return for of in while if else switch case break continue class extends new this super try catch finally throw import export from default async await true false null undefined typeof instanceof interface type enum implements public private readonly string number boolean void any unknown never".split(" ")),
   c: new Set("int long double float char bool void const auto struct enum return for while if else static new delete NULL true false size_t unsigned signed short switch case break continue typedef".split(" ")),
   java: new Set("abstract boolean break byte case catch char class continue default do double else enum extends final finally float for if implements import instanceof int interface long new package private protected public return short static super switch this throw throws try void while true false null var".split(" ")),
   go: new Set("break case chan const continue default defer else fallthrough for func go goto if import interface map package range return select struct switch type var bool byte error int int64 string true false nil".split(" ")),
   rust: new Set("as async await break const continue crate else enum extern false fn for if impl in let loop match mod move mut pub ref return self Self static struct super trait true type unsafe use where while".split(" ")),
 };
-const EXT = { "C++": "cpp", C: "c", Python: "py", JavaScript: "js", TypeScript: "ts", Java: "java", Go: "go", Rust: "rs" };
-const BROWSER_LANGUAGES = new Set(["C", "Python", "JavaScript", "TypeScript"]);
+const EXT = { "C++": "cpp", C: "c", Python: "py", JavaScript: "js", Java: "java", Go: "go", Rust: "rs" };
+const BROWSER_LANGUAGES = new Set(["C++", "C", "Python", "JavaScript"]);
 const PYODIDE_VERSION = "v0.27.7";
-const TYPESCRIPT_VERSION = "5.8.3";
-const TYPESCRIPT_URL = `https://cdn.jsdelivr.net/npm/typescript@${TYPESCRIPT_VERSION}/lib/typescript.js`;
 const WASMER_SDK_URL = "https://cdn.jsdelivr.net/npm/@wasmer/sdk@0.19.1/dist/index.js";
+const RUNNO_MODULE_URL = "https://cdn.jsdelivr.net/npm/@runno/runtime@0.10.3/dist/main.js";
 const CLANG_PACKAGE = "clang/clang@=0.160000.1";
 const WRONG_SERVER = "This page is not being served by the Dhwani-Code backend. Stop any other server, run `python main.py`, and open http://127.0.0.1:8000 in the browser (do not open index.html directly or through Live Server).";
 const OWNER = (() => {
@@ -449,7 +447,6 @@ const state = {
   fault: null, // { tab, line, suggested }
   abort: null, consoleView: "errors", compilerBusy: false, compilerAbort: null,
 };
-let typescriptPromise;
 let wasmerPromise;
 
 /* ------------------------------------------------------------------ *
@@ -475,7 +472,7 @@ function highlight(line, hl) {
 }
 
 function highlightSource(source, language) {
-  const hl = ({ "C++": "cpp", C: "c", Python: "python", JavaScript: "javascript", TypeScript: "typescript", Java: "java", Go: "go", Rust: "rust" })[language];
+  const hl = ({ "C++": "cpp", C: "c", Python: "python", JavaScript: "javascript", Java: "java", Go: "go", Rust: "rust" })[language];
   if (!hl) return esc(source);
   const keywordSet = KEYWORDS[hl] || new Set();
   const tokenPattern = /\/\*[\s\S]*?\*\/|\/\/[^\n]*|#[^\n]*|`(?:\\.|[^`\\])*`|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|\b\d+(?:\.\d+)?\b|\b[A-Za-z_$][\w$]*\b/g;
@@ -530,10 +527,10 @@ function renderEditor() {
         ? "Runs in your browser; the Python runtime downloads on first use."
         : language === "JavaScript"
           ? "Runs locally in an isolated browser frame."
-          : language === "TypeScript"
-            ? "Transpiles in your browser (no type-checking or imports), then runs locally."
+          : language === "C++"
+            ? "Compiles and runs in your browser; the C++ toolchain downloads on first use."
             : "Compiles and runs in your browser; the C compiler downloads on first use."
-      : "Browser runner supports C, Python, JavaScript, and TypeScript.";
+      : "Browser runner supports C++, C, Python, and JavaScript.";
     $("#runCode").hidden = false;
     $("#runCode").disabled = state.compilerBusy || !canRun;
     $("#runCode").textContent = state.compilerBusy ? "Running…" : "Run code";
@@ -748,53 +745,6 @@ function runPythonInWorker(code, stdin, signal, onReady) {
   });
 }
 
-function loadTypeScriptCompiler() {
-  if (!typescriptPromise) {
-    typescriptPromise = new Promise((resolve, reject) => {
-      const script = document.createElement("script");
-      script.src = TYPESCRIPT_URL;
-      script.crossOrigin = "anonymous";
-      script.onload = () => window.ts
-        ? resolve(window.ts)
-        : reject(new Error("The TypeScript compiler loaded without exposing its API."));
-      script.onerror = () => reject(new Error("Could not download the TypeScript compiler from jsDelivr."));
-      document.head.append(script);
-    }).catch((error) => {
-      typescriptPromise = null;
-      throw error;
-    });
-  }
-  return typescriptPromise;
-}
-
-async function transpileTypeScript(code) {
-  const ts = await loadTypeScriptCompiler();
-  const sourceFile = ts.createSourceFile("main.ts", code, ts.ScriptTarget.Latest, true);
-  if (ts.isExternalModule(sourceFile)) {
-    throw new Error("TypeScript modules are not supported in the single-file browser runner. Remove import/export statements.");
-  }
-  const result = ts.transpileModule(code, {
-    fileName: "main.ts",
-    reportDiagnostics: true,
-    compilerOptions: {
-      target: ts.ScriptTarget.ES2022,
-      module: ts.ModuleKind.None,
-    },
-  });
-  const errors = (result.diagnostics || []).filter((diagnostic) => diagnostic.category === ts.DiagnosticCategory.Error);
-  if (errors.length) {
-    const messages = errors.map((diagnostic) => {
-      const position = diagnostic.file && diagnostic.start !== undefined
-        ? diagnostic.file.getLineAndCharacterOfPosition(diagnostic.start)
-        : null;
-      const location = position ? `Line ${position.line + 1}, column ${position.character + 1}: ` : "";
-      return `${location}TS${diagnostic.code}: ${ts.flattenDiagnosticMessageText(diagnostic.messageText, "\n")}`;
-    });
-    throw new Error(messages.join("\n"));
-  }
-  return result.outputText;
-}
-
 async function loadWasmer() {
   if (!globalThis.crossOriginIsolated) {
     throw new Error("The C runner needs a cross-origin-isolated page. Use the FastAPI app at its normal URL; static or file:// hosting will not work.");
@@ -890,6 +840,72 @@ async function runCInBrowser(code, stdin, signal, onProgress, onReady) {
   }
 }
 
+function runCppInBrowser(code, stdin, signal, onProgress) {
+  if (!globalThis.crossOriginIsolated) {
+    return Promise.reject(new Error("The C++ runner needs a cross-origin-isolated page. Use the FastAPI app at its normal URL; static or file:// hosting will not work."));
+  }
+  return new Promise((resolve, reject) => {
+    const frame = document.createElement("iframe");
+    const token = crypto.randomUUID();
+    frame.title = "Isolated C++ compiler";
+    frame.hidden = true;
+    const source = `<!doctype html><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline' 'wasm-unsafe-eval' https://cdn.jsdelivr.net; connect-src https://runno.dev; worker-src blob:; style-src 'unsafe-inline'"><script type="module">
+      const token = ${JSON.stringify(token)};
+      const send = (type, payload = {}) => parent.postMessage({ type, token, ...payload }, "*");
+      try {
+        const { headlessRunCode } = await import(${JSON.stringify(RUNNO_MODULE_URL)});
+        addEventListener("message", async (event) => {
+          if (event.source !== parent || event.data?.type !== "run" || event.data.token !== token) return;
+          try {
+            const result = await headlessRunCode("clangpp", event.data.code, event.data.stdin);
+            if (result.resultType === "complete") {
+              send("result", { result: { stdout: result.stdout, stderr: result.stderr, exit_code: result.exitCode } });
+            } else if (result.resultType === "crash") {
+              send("result", { result: { stdout: "", stderr: result.error.message, exit_code: 1 } });
+            } else {
+              send("result", { result: { stdout: "", stderr: "The C++ process was stopped.", exit_code: 1 } });
+            }
+          } catch (error) {
+            send("failure", { error: String(error && (error.stack || error)) });
+          }
+        }, { once: true });
+        send("ready");
+      } catch (error) {
+        send("failure", { error: String(error && (error.stack || error)) });
+      }
+    <\/script>`;
+    let settled = false;
+    const cleanup = () => {
+      window.removeEventListener("message", onMessage);
+      signal.removeEventListener("abort", onAbort);
+      frame.remove();
+    };
+    const finish = (callback, value) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      callback(value);
+    };
+    const onAbort = () => finish(reject, new DOMException("Execution cancelled.", "AbortError"));
+    const onMessage = (event) => {
+      if (event.source !== frame.contentWindow || event.data?.token !== token) return;
+      if (event.data.type === "ready") {
+        onProgress("Downloading the C++ toolchain and compiling in your browser…");
+        frame.contentWindow.postMessage({ type: "run", token, code, stdin }, "*");
+      } else if (event.data.type === "result") {
+        finish(resolve, event.data.result);
+      } else if (event.data.type === "failure") {
+        finish(reject, new Error(event.data.error || "The C++ runtime could not start."));
+      }
+    };
+    if (signal.aborted) return onAbort();
+    window.addEventListener("message", onMessage);
+    signal.addEventListener("abort", onAbort, { once: true });
+    frame.srcdoc = source;
+    document.body.append(frame);
+  });
+}
+
 async function runCode() {
   const language = $("#customLang").value;
   if (!BROWSER_LANGUAGES.has(language)) return;
@@ -914,8 +930,10 @@ async function runCode() {
   renderEditor();
   output.textContent = language === "Python"
     ? "Starting the Python runtime in your browser. The first run downloads it; this can take a minute."
-    : "Running JavaScript in an isolated browser frame…";
-  let timeout = setTimeout(() => controller.abort(), language === "Python" || language === "C" ? 180_000 : 10_000);
+    : language === "C" || language === "C++"
+      ? `Starting the ${language} compiler in your browser. The first run downloads the toolchain.`
+      : "Running JavaScript in an isolated browser frame…";
+  let timeout = setTimeout(() => controller.abort(), language === "Python" || language === "C" || language === "C++" ? 180_000 : 10_000);
   try {
     const stdin = $("#compilerStdin").value;
     const execute = language === "Python"
@@ -924,13 +942,10 @@ async function runCode() {
           timeout = setTimeout(() => controller.abort(), 15_000);
           output.textContent = "Python runtime ready. Running your code…";
         })
-      : language === "TypeScript"
-        ? async () => {
-            output.textContent = "Downloading the TypeScript compiler and transpiling in your browser…";
-            const javascript = await transpileTypeScript(code);
-            output.textContent = "TypeScript transpiled. Running the generated JavaScript…";
-            return runJavaScriptInFrame(javascript, stdin, controller.signal);
-          }
+      : language === "C++"
+        ? () => runCppInBrowser(code, stdin, controller.signal, (message) => {
+            output.textContent = message;
+          })
         : language === "C"
           ? () => runCInBrowser(code, stdin, controller.signal, (message) => {
               output.textContent = message;

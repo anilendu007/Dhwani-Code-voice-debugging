@@ -84,13 +84,12 @@ def _env_num(name: str, default: Any, cast: Any) -> Any:
 
 _TTS_RATES = (8000, 16000, 22050, 24000, 44100, 48000)
 JUDGE0_DEFAULT_URL = "https://judge0-ce.p.rapidapi.com"
-JUDGE0_LANGUAGES = frozenset({"C++", "C", "Python", "JavaScript", "TypeScript", "Java", "Go", "Rust"})
+JUDGE0_LANGUAGES = frozenset({"C++", "C", "Python", "JavaScript", "Java", "Go", "Rust"})
 JUDGE0_FILENAMES = {
     "C++": "main.cpp",
     "C": "main.c",
     "Python": "main.py",
     "JavaScript": "main.js",
-    "TypeScript": "main.ts",
     "Java": "Main.java",
     "Go": "main.go",
     "Rust": "main.rs",

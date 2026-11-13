@@ -15,11 +15,11 @@ Dhwani-Code is a voice debugging companion for Indian developers. Ask about code
 2. Accepts a spoken or typed question.
 3. Sends audio, code, error output, and the question to Gemini through the backend.
 4. Shows the diagnosis and suggested source line, and can speak the answer.
-5. Highlights pasted code and runs JavaScript, Python, TypeScript, and C locally in the browser. The browser runner needs no compiler API key or separate execution server.
+5. Highlights pasted code and runs JavaScript, Python, C, and C++ locally in the browser. The browser runner needs no compiler API key or separate execution server.
 
 Gemini is used for speech-to-text, code analysis, and text-to-speech. The Gemini API key stays on the server.
 
-The browser runner executes JavaScript in a restricted iframe, Python with Pyodide in a Web Worker, and TypeScript by transpiling it with the TypeScript compiler. C is compiled to WebAssembly with Clang in the browser using the Wasmer SDK. The runtimes/compiler are downloaded from jsDelivr or the Wasmer registry on first use; code and standard input stay on the user's device. TypeScript runs transpiled JavaScript without type-checking or module imports. C++ and Java, Go, and Rust remain syntax-highlighted but are not executable in the browser runner.
+The browser runner executes JavaScript in a restricted iframe, Python with Pyodide in a Web Worker, C with Clang in the Wasmer SDK, and C++ with Runno's WebAssembly Clang++ runtime. The runtimes/compiler are downloaded from jsDelivr, Wasmer, or Runno on first use; program source and standard input stay on the user's device. Java, Go, and Rust remain syntax-highlighted but are not executable in the browser runner.
 
 The backend's optional `POST /api/run` Judge0 integration remains available for deployments that configure a separate Judge0 service. It is not required by the browser Run button.
 
@@ -141,13 +141,12 @@ If a model is unavailable to the configured key, the API reports `MODEL_NOT_AVAI
 - Responses depend on the context provided. The current UI is a mock editor and does not automatically read a real IDE's files or diagnostics.
 - Each question is independent; the model has no conversation memory.
 - Browser-side execution uses the visitor's device and is not a substitute for server-side isolation for untrusted multi-user workloads.
-- TypeScript is transpiled in the browser using the pinned TypeScript compiler from jsDelivr. This is transpilation only (not semantic type-checking); module imports/exports are not supported.
-- The C runner downloads the pinned Wasmer SDK and Clang package from their public registries on first use. C compilation requires internet access, a browser with WebAssembly threads and `SharedArrayBuffer` support, and the app's FastAPI root page (which sets the cross-origin-isolation headers). C++ is not enabled because the verified Clang package documents C support, not a C++ standard library. The compiler runs in a browser WebAssembly sandbox; it is not a remote code-execution service. The SDK uses Wasmer's modified MIT license; products over its stated usage thresholds must display Wasmer branding.
-- JavaScript, Python, TypeScript, and C source and standard input are executed or compiled on the visitor's device, not sent to a compiler service. Python and TypeScript runtimes and the C compiler are downloaded from jsDelivr or Wasmer on first use.
+- C and C++ compilation require internet access and a browser with WebAssembly threads and `SharedArrayBuffer` support. The FastAPI root page sets the required cross-origin-isolation headers. The C runner downloads the pinned Wasmer SDK/Clang package; the C++ runner downloads the pinned Runno runtime and its Clang++ assets. Both compile and execute in browser WebAssembly sandboxes rather than a remote code-execution service. Runno is MIT licensed; the Wasmer SDK uses a modified MIT license with a branding requirement above its published usage thresholds.
+- JavaScript, Python, C, and C++ source and standard input are executed or compiled on the visitor's device, not sent to a compiler service. Python, C, and C++ runtimes/toolchains download from jsDelivr, Wasmer, or Runno on first use.
 - Gemini TTS is generated as a complete response before the browser starts playback, rather than streamed as it is generated.
 - The rate limiter is held in memory and resets when the process restarts. It is not a substitute for authentication or persistent quota controls.
 - Gemini API access, available models, quotas, and pricing depend on your Google account and current API configuration.
-- Audio, transcripts, code, and error output used for AI debugging are sent to Google Gemini. Browser-run code and stdin are executed locally; compiler/runtime bundles are downloaded from jsDelivr or Wasmer. Do not send secrets or proprietary code to Gemini unless you are comfortable with that service receiving it.
+- Audio, transcripts, code, and error output used for AI debugging are sent to Google Gemini. Browser-run code and stdin are executed locally; compiler/runtime bundles are downloaded from jsDelivr, Wasmer, or Runno. Do not send secrets or proprietary code to Gemini unless you are comfortable with that service receiving it.
 
 ## Tests
 

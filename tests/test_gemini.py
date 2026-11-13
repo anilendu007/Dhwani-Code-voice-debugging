@@ -40,7 +40,6 @@ def judge0_languages() -> list[dict[str, object]]:
         {"id": 71, "name": "Python (3.8.1)"},
         {"id": 70, "name": "Python (2.7.17)"},
         {"id": 63, "name": "JavaScript (Node.js 12.14.0)"},
-        {"id": 74, "name": "TypeScript (3.7.4)"},
         {"id": 62, "name": "Java (OpenJDK 13.0.1)"},
         {"id": 60, "name": "Go (1.13.5)"},
         {"id": 73, "name": "Rust (1.40.0)"},
@@ -306,6 +305,8 @@ class GeminiClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(error.exception.code, "COMPILER_NOT_CONFIGURED")
         with self.assertRaises(ValueError):
             main.RunRequest(language="Ruby", code="puts 1")
+        with self.assertRaises(ValueError):
+            main.RunRequest(language="TypeScript", code="console.log(1)")
 
     async def test_transcription_sends_audio_with_server_key(self) -> None:
         requests = []
