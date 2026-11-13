@@ -11,8 +11,8 @@ GEMINI_TTS_MODEL=gemini-3.8-flash-tts
 GEMINI_TTS_VOICE=Kore
 GEMINI_TIMEOUT_S=90
 
-# Judge0 CE RapidAPI key for sandboxed online compilation (separate from Gemini).
-JUDGE0_API_KEY=<your Judge0 CE RapidAPI key>
+# Optional Judge0 settings for the backend API only. The browser runner needs neither.
+JUDGE0_API_KEY=<your Judge0 API key or self-hosted auth token>
 JUDGE0_API_URL=https://judge0-ce.p.rapidapi.com
 
 # Protect public demos. Limits are in-memory and reset when the server restarts.

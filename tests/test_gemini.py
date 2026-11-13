@@ -3,6 +3,7 @@ import io
 import json
 import unittest
 import wave
+from dataclasses import replace
 from unittest.mock import AsyncMock, patch
 
 from fastapi.testclient import TestClient
@@ -30,6 +31,20 @@ def settings() -> main.Settings:
 
 def response_text(text: str) -> dict:
     return {"candidates": [{"content": {"parts": [{"text": text}]}}]}
+
+
+def judge0_languages() -> list[dict[str, object]]:
+    return [
+        {"id": 50, "name": "C (GCC 9.2.0)"},
+        {"id": 54, "name": "C++ (GCC 9.2.0)"},
+        {"id": 71, "name": "Python (3.8.1)"},
+        {"id": 70, "name": "Python (2.7.17)"},
+        {"id": 63, "name": "JavaScript (Node.js 12.14.0)"},
+        {"id": 74, "name": "TypeScript (3.7.4)"},
+        {"id": 62, "name": "Java (OpenJDK 13.0.1)"},
+        {"id": 60, "name": "Go (1.13.5)"},
+        {"id": 73, "name": "Rust (1.40.0)"},
+    ]
 
 
 def wav_bytes() -> bytes:
@@ -65,6 +80,8 @@ class GeminiClientTests(unittest.IsolatedAsyncioTestCase):
 
         async def handler(request: httpx.Request) -> httpx.Response:
             requests.append(request)
+            if request.url.path == "/languages":
+                return httpx.Response(200, json=judge0_languages())
             return httpx.Response(200, json={
                 "models": [{
                     "name": "models/gemini-3.8-flash",
@@ -140,6 +157,8 @@ class GeminiClientTests(unittest.IsolatedAsyncioTestCase):
 
         async def handler(request: httpx.Request) -> httpx.Response:
             requests.append(request)
+            if request.url.path == "/languages":
+                return httpx.Response(200, json=judge0_languages())
             return httpx.Response(200, json={
                 "status": {"id": 3, "description": "Accepted"},
                 "stdout": "42\n",
@@ -157,11 +176,12 @@ class GeminiClientTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result["stdout"], "42\n")
         self.assertTrue(result["success"])
-        self.assertEqual(requests[0].url.path, "/submissions")
-        self.assertEqual(requests[0].url.params["wait"], "false")
+        self.assertEqual(requests[0].url.path, "/languages")
+        self.assertEqual(requests[1].url.path, "/submissions")
+        self.assertEqual(requests[1].url.params["wait"], "false")
         self.assertEqual(requests[0].headers["x-rapidapi-key"], "judge0-test-key")
-        payload = json.loads(requests[0].content)
-        self.assertEqual(payload["language_id"], main.JUDGE0_LANGUAGE_IDS["JavaScript"])
+        payload = json.loads(requests[1].content)
+        self.assertEqual(payload["language_id"], 63)
         self.assertEqual(payload["stdin"], "input\n")
         self.assertEqual(payload["wall_time_limit"], 5)
 
@@ -170,9 +190,14 @@ class GeminiClientTests(unittest.IsolatedAsyncioTestCase):
 
         async def handler(request: httpx.Request) -> httpx.Response:
             requests.append(request)
+            if request.url.path == "/languages":
+                return httpx.Response(200, json=judge0_languages())
             if request.method == "POST":
                 return httpx.Response(201, json={"token": "submission-token"})
-            if len([item for item in requests if item.method == "GET"]) == 1:
+            if len([
+                item for item in requests
+                if item.method == "GET" and item.url.path.startswith("/submissions/")
+            ]) == 1:
                 return httpx.Response(200, json={"status": {"id": 2, "description": "Processing"}})
             return httpx.Response(200, json={
                 "status": {"id": 3, "description": "Accepted"},
@@ -187,8 +212,67 @@ class GeminiClientTests(unittest.IsolatedAsyncioTestCase):
                 )
 
         self.assertEqual(result["stdout"], "done")
-        self.assertEqual([request.method for request in requests], ["POST", "GET", "GET"])
-        self.assertIn("/submissions/submission-token", requests[1].url.path)
+        self.assertEqual([request.method for request in requests], ["GET", "POST", "GET", "GET"])
+        self.assertEqual(requests[0].url.path, "/languages")
+        self.assertIn("/submissions/submission-token", requests[2].url.path)
+
+    async def test_judge0_supports_self_hosted_url_and_auth_token(self) -> None:
+        requests = []
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            if request.url.path == "/languages":
+                return httpx.Response(200, json=judge0_languages())
+            return httpx.Response(200, json={
+                "status": {"id": 3, "description": "Accepted"},
+                "stdout": "self-hosted",
+                "exit_code": 0,
+            })
+
+        self_hosted_settings = replace(
+            settings(),
+            judge0_api_key="self-hosted-token",
+            judge0_api_url="https://compiler.example.test",
+        )
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+            result = await main.Judge0Client(self_hosted_settings, http).run(
+                main.RunRequest(language="Python", code="print('self-hosted')")
+            )
+
+        self.assertEqual(result["stdout"], "self-hosted")
+        self.assertEqual(result["language_id"], 71)
+        self.assertEqual(requests[0].url.host, "compiler.example.test")
+        self.assertEqual(requests[0].headers["x-auth-token"], "self-hosted-token")
+        self.assertNotIn("x-rapidapi-key", requests[0].headers)
+        self.assertEqual(json.loads(requests[1].content)["language_id"], 71)
+
+    async def test_judge0_allows_unauthenticated_local_instance(self) -> None:
+        requests = []
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            if request.url.path == "/languages":
+                return httpx.Response(200, json=judge0_languages())
+            return httpx.Response(200, json={
+                "status": {"id": 3, "description": "Accepted"},
+                "stdout": "local",
+                "exit_code": 0,
+            })
+
+        local_settings = replace(
+            settings(),
+            judge0_api_key="",
+            judge0_api_url="http://localhost:2358",
+        )
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+            result = await main.Judge0Client(local_settings, http).run(
+                main.RunRequest(language="Python", code="print('local')")
+            )
+
+        self.assertEqual(result["stdout"], "local")
+        self.assertEqual(requests[0].url.host, "localhost")
+        self.assertEqual(requests[0].url.port, 2358)
+        self.assertNotIn("x-auth-token", requests[0].headers)
 
     async def test_judge0_requires_configuration_and_rejects_unknown_language(self) -> None:
         async with httpx.AsyncClient(transport=httpx.MockTransport(lambda _: self.fail("unexpected request"))) as http:

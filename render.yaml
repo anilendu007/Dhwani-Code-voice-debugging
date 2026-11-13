@@ -15,7 +15,3 @@ services:
         value: gemini-3.8-flash-tts
       - key: GEMINI_TTS_VOICE
         value: Kore
-      - key: JUDGE0_API_KEY
-        sync: false
-      - key: JUDGE0_API_URL
-        value: https://judge0-ce.p.rapidapi.com

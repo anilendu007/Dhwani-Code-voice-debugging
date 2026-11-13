@@ -425,6 +425,8 @@ const KEYWORDS = {
   rust: new Set("as async await break const continue crate else enum extern false fn for if impl in let loop match mod move mut pub ref return self Self static struct super trait true type unsafe use where while".split(" ")),
 };
 const EXT = { "C++": "cpp", C: "c", Python: "py", JavaScript: "js", TypeScript: "ts", Java: "java", Go: "go", Rust: "rs" };
+const BROWSER_LANGUAGES = new Set(["Python", "JavaScript"]);
+const PYODIDE_VERSION = "v0.27.7";
 const WRONG_SERVER = "This page is not being served by the Dhwani-Code backend. Stop any other server, run `python main.py`, and open http://127.0.0.1:8000 in the browser (do not open index.html directly or through Live Server).";
 const OWNER = (() => {
   const q = new URLSearchParams(location.search).get("owner");
@@ -515,20 +517,20 @@ function renderEditor() {
   $("#logView").hidden = custom;
   if (custom) {
     renderCustomHighlight();
-    const canRun = Object.hasOwn(EXT, $("#customLang").value);
-    if (!canRun) state.consoleView = "errors";
+    const language = $("#customLang").value;
+    const canRun = BROWSER_LANGUAGES.has(language);
     $("#runnerHint").textContent = canRun
-      ? state.cfg?.compiler_configured
-        ? "Sandboxed runs; code is sent to Judge0."
-        : "Add JUDGE0_API_KEY in Render to enable online runs."
-      : "No online runtime is available for this language.";
-    $("#runCode").hidden = !canRun;
-    $("#runCode").disabled = state.compilerBusy;
+      ? language === "Python"
+        ? "Runs in your browser; the Python runtime downloads on first use."
+        : "Runs locally in an isolated browser frame."
+      : "Browser runner currently supports Python and JavaScript.";
+    $("#runCode").hidden = false;
+    $("#runCode").disabled = state.compilerBusy || !canRun;
     $("#runCode").textContent = state.compilerBusy ? "Running…" : "Run code";
-    $("#consoleToggle").hidden = !canRun;
+    $("#consoleToggle").hidden = false;
     $("#consoleToggle").textContent = state.consoleView === "output" ? "Show error context" : "Show run output";
-    $("#customLog").hidden = state.consoleView === "output" && canRun;
-    $("#runOutput").hidden = !(state.consoleView === "output" && canRun);
+    $("#customLog").hidden = state.consoleView === "output";
+    $("#runOutput").hidden = state.consoleView !== "output";
     return;
   }
   $("#customLog").hidden = true;
@@ -599,19 +601,146 @@ function cancelCompilerRun() {
   $("#runCode").textContent = "Run code";
 }
 
-function formatCompilerResult(result) {
+function formatBrowserResult(result) {
   const sections = [];
-  if (result.compile_output) sections.push(`Compiler output:\n${result.compile_output}`);
-  if (result.stdout) sections.push(`Program output:\n${result.stdout}`);
-  if (result.stderr) sections.push(`Error output:\n${result.stderr}`);
-  if (result.message) sections.push(`Details:\n${result.message}`);
-  sections.push(`Status: ${result.status}${result.exit_code == null ? "" : ` · exit code ${result.exit_code}`}`);
-  if (result.time != null) sections.push(`Time: ${result.time}s · Memory: ${result.memory ?? "—"} KB`);
+  if (result.stdout) sections.push(`Program output:\n${result.stdout.trimEnd()}`);
+  if (result.stderr) sections.push(`Error output:\n${result.stderr.trimEnd()}`);
+  sections.push(`Status: ${result.exit_code === 0 ? "Completed in your browser" : "Execution failed"} · exit code ${result.exit_code}`);
+  sections.push("Your code was executed on this device, not sent to a compiler server.");
   return sections.join("\n\n");
 }
 
+function runJavaScriptInFrame(code, stdin, signal) {
+  return new Promise((resolve, reject) => {
+    const frame = document.createElement("iframe");
+    const token = crypto.randomUUID();
+    frame.title = "Isolated JavaScript runner";
+    frame.setAttribute("sandbox", "allow-scripts");
+    frame.hidden = true;
+    const source = `<!doctype html><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval'; connect-src 'none'; form-action 'none'; base-uri 'none'; object-src 'none'"><script>
+      const token = ${JSON.stringify(token)};
+      const append = (current, text) => current.length >= 30000 ? current : (current + text).slice(0, 30000);
+      const format = (value) => {
+        if (typeof value === "string") return value;
+        try { const json = JSON.stringify(value); return json === undefined ? String(value) : json; }
+        catch { return String(value); }
+      };
+      addEventListener("message", async (event) => {
+        const request = event.data;
+        if (event.source !== parent || !request || request.type !== "run" || request.token !== token) return;
+        let stdout = "", stderr = "", exit_code = 0, index = 0;
+        const input = String(request.stdin || "").split(/\\r\\n|\\n|\\r/);
+        const read = () => index < input.length ? input[index++] : null;
+        const prompt = () => read();
+        const readline = () => { const value = read(); return value === null ? "" : value; };
+        const log = (...values) => { stdout = append(stdout, values.map(format).join(" ") + "\\n"); };
+        const error = (...values) => { stderr = append(stderr, values.map(format).join(" ") + "\\n"); };
+        const sandboxConsole = { log, info: log, debug: log, warn: error, error };
+        try {
+          const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+          await new AsyncFunction("console", "prompt", "readline", request.code)(sandboxConsole, prompt, readline);
+        } catch (exception) {
+          stderr = append(stderr, String(exception && (exception.stack || exception)));
+          exit_code = 1;
+        }
+        parent.postMessage({ type: "result", token, result: { stdout, stderr, exit_code } }, "*");
+      }, { once: true });
+    <\/script>`;
+    let settled = false;
+    const cleanup = () => {
+      window.removeEventListener("message", onMessage);
+      signal.removeEventListener("abort", onAbort);
+      frame.remove();
+    };
+    const finish = (callback, value) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      callback(value);
+    };
+    const onAbort = () => finish(reject, new DOMException("Execution cancelled.", "AbortError"));
+    const onMessage = (event) => {
+      if (event.source !== frame.contentWindow || event.data?.type !== "result" || event.data.token !== token) return;
+      finish(resolve, event.data.result);
+    };
+    if (signal.aborted) return onAbort();
+    window.addEventListener("message", onMessage);
+    signal.addEventListener("abort", onAbort, { once: true });
+    frame.onload = () => frame.contentWindow.postMessage({ type: "run", token, code, stdin }, "*");
+    frame.srcdoc = source;
+    document.body.append(frame);
+  });
+}
+
+const PYTHON_WORKER_SOURCE = `
+const append = (current, text) => current.length >= 30000 ? current : (current + text).slice(0, 30000);
+self.onmessage = async (event) => {
+  const { token, code, stdin } = event.data;
+  let stdout = "", stderr = "";
+  const send = (result) => self.postMessage({ token, result });
+  try {
+    const { loadPyodide } = await import("https://cdn.jsdelivr.net/pyodide/${PYODIDE_VERSION}/full/pyodide.mjs");
+    const pyodide = await loadPyodide({ indexURL: "https://cdn.jsdelivr.net/pyodide/${PYODIDE_VERSION}/full/" });
+    pyodide.setStdout({ batched: (line) => { stdout = append(stdout, line + "\\n"); } });
+    pyodide.setStderr({ batched: (line) => { stderr = append(stderr, line + "\\n"); } });
+    pyodide.runPython("import io, sys\\nsys.stdin = io.StringIO(" + JSON.stringify(stdin) + ")");
+    self.fetch = () => Promise.reject(new Error("Network access is disabled while user code runs."));
+    self.XMLHttpRequest = undefined;
+    self.WebSocket = undefined;
+    self.EventSource = undefined;
+    self.importScripts = undefined;
+    self.postMessage({ type: "ready", token });
+    await pyodide.runPythonAsync(code);
+    send({ stdout, stderr, exit_code: 0 });
+  } catch (error) {
+    send({ stdout, stderr: append(stderr, String(error && (error.stack || error))), exit_code: 1 });
+  }
+};
+`;
+
+function runPythonInWorker(code, stdin, signal, onReady) {
+  return new Promise((resolve, reject) => {
+    const blobUrl = URL.createObjectURL(new Blob([PYTHON_WORKER_SOURCE], { type: "text/javascript" }));
+    let worker;
+    try {
+      worker = new Worker(blobUrl, { type: "module" });
+    } catch (error) {
+      URL.revokeObjectURL(blobUrl);
+      reject(error);
+      return;
+    }
+    const token = crypto.randomUUID();
+    let settled = false;
+    const cleanup = () => {
+      signal.removeEventListener("abort", onAbort);
+      worker.terminate();
+      URL.revokeObjectURL(blobUrl);
+    };
+    const finish = (callback, value) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      callback(value);
+    };
+    const onAbort = () => finish(reject, new DOMException("Execution cancelled.", "AbortError"));
+    if (signal.aborted) return onAbort();
+    signal.addEventListener("abort", onAbort, { once: true });
+    worker.onmessage = (event) => {
+      if (event.data?.token !== token) return;
+      if (event.data.type === "ready") {
+        onReady();
+        return;
+      }
+      if (event.data.result) finish(resolve, event.data.result);
+    };
+    worker.onerror = (event) => finish(reject, new Error(event.message || "The Python runtime could not start."));
+    worker.postMessage({ token, code, stdin });
+  });
+}
+
 async function runCode() {
-  if (!Object.hasOwn(EXT, $("#customLang").value)) return;
+  const language = $("#customLang").value;
+  if (!BROWSER_LANGUAGES.has(language)) return;
   cancelCompilerRun();
   state.consoleView = "output";
   renderEditor();
@@ -630,27 +759,27 @@ async function runCode() {
   const controller = new AbortController();
   state.compilerAbort = controller;
   state.compilerBusy = true;
-  $("#runCode").disabled = true;
-  $("#runCode").textContent = "Running…";
   renderEditor();
-  output.textContent = "Sending code to the sandboxed online compiler…";
-  const timeout = setTimeout(() => controller.abort(), 35_000);
+  output.textContent = language === "Python"
+    ? "Starting the Python runtime in your browser. The first run downloads it; this can take a minute."
+    : "Running JavaScript in an isolated browser frame…";
+  let timeout = setTimeout(() => controller.abort(), language === "Python" ? 120_000 : 10_000);
   try {
-    const response = await fetch("/api/run", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", ...authHeaders() },
-      body: JSON.stringify({ language: $("#customLang").value, code, stdin: $("#compilerStdin").value }),
-      signal: controller.signal,
-    });
-    const body = await response.json().catch(() => null);
-    if (!response.ok) throw new Error(body?.error?.message || `Compiler service returned ${response.status}.`);
-    output.textContent = formatCompilerResult(body.result);
-    output.classList.toggle("err", !body.result.success);
+    const execute = language === "Python"
+      ? () => runPythonInWorker(code, $("#compilerStdin").value, controller.signal, () => {
+          clearTimeout(timeout);
+          timeout = setTimeout(() => controller.abort(), 15_000);
+          output.textContent = "Python runtime ready. Running your code…";
+        })
+      : () => runJavaScriptInFrame(code, $("#compilerStdin").value, controller.signal);
+    const result = await execute();
+    output.textContent = formatBrowserResult(result);
+    output.classList.toggle("err", result.exit_code !== 0);
   } catch (error) {
     output.classList.add("err");
     output.textContent = error.name === "AbortError"
-      ? "The compiler request timed out or was cancelled."
-      : error.message || "Could not reach the online compiler.";
+      ? "Execution timed out or was cancelled. The browser stopped the running code."
+      : error.message || "Could not start the browser runtime. Check your connection and try again.";
   } finally {
     clearTimeout(timeout);
     if (state.compilerAbort === controller) cancelCompilerRun();

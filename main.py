@@ -84,16 +84,7 @@ def _env_num(name: str, default: Any, cast: Any) -> Any:
 
 _TTS_RATES = (8000, 16000, 22050, 24000, 44100, 48000)
 JUDGE0_DEFAULT_URL = "https://judge0-ce.p.rapidapi.com"
-JUDGE0_LANGUAGE_IDS = {
-    "C++": 105,
-    "C": 103,
-    "Python": 113,
-    "JavaScript": 102,
-    "TypeScript": 101,
-    "Java": 91,
-    "Go": 107,
-    "Rust": 108,
-}
+JUDGE0_LANGUAGES = frozenset({"C++", "C", "Python", "JavaScript", "TypeScript", "Java", "Go", "Rust"})
 JUDGE0_FILENAMES = {
     "C++": "main.cpp",
     "C": "main.c",
@@ -299,7 +290,7 @@ class RunRequest(BaseModel):
     @field_validator("language")
     @classmethod
     def _supported_language(cls, value: str) -> str:
-        if value not in JUDGE0_LANGUAGE_IDS:
+        if value not in JUDGE0_LANGUAGES:
             raise ValueError(f"Unsupported compiler language: {value}")
         return value
 
@@ -820,6 +811,7 @@ class Judge0Client:
 
     def __init__(self, settings: Settings, http: httpx.AsyncClient):
         self.s, self._http = settings, http
+        self._language_ids: dict[str, int] | None = None
 
     def _headers(self) -> dict[str, str]:
         target = urllib.parse.urlsplit(self.s.judge0_api_url)
@@ -873,7 +865,7 @@ class Judge0Client:
         if response.status_code in (401, 403):
             raise PipelineError(
                 "compiler", "COMPILER_AUTH_FAILED",
-                "Judge0 rejected its API credentials. Check JUDGE0_API_KEY in the Render environment.", 502,
+                "Judge0 rejected its API credentials. Check JUDGE0_API_KEY and the Judge0 authentication settings.", 502,
             )
         if response.status_code == 429:
             raise PipelineError(
@@ -931,8 +923,63 @@ class Judge0Client:
             "The compiler is still busy. Please run the program again in a moment.", 504,
         )
 
+    async def _language_id(self, language: str, headers: dict[str, str]) -> int:
+        if self._language_ids is None:
+            try:
+                response = await self._http.get(
+                    f"{self.s.judge0_api_url}/languages",
+                    headers=headers,
+                    timeout=httpx.Timeout(15.0, connect=8.0),
+                )
+            except httpx.TimeoutException as exc:
+                raise PipelineError(
+                    "compiler", "COMPILER_TIMEOUT", "The online compiler took too long to respond. Try again.", 504
+                ) from exc
+            except httpx.HTTPError as exc:
+                raise PipelineError(
+                    "compiler", "COMPILER_UNREACHABLE",
+                    f"Could not reach the online compiler: {exc.__class__.__name__}.", 502,
+                ) from exc
+            self._check_response(response)
+            try:
+                languages = response.json()
+            except ValueError as exc:
+                raise PipelineError(
+                    "compiler", "BAD_COMPILER_RESPONSE", "Judge0 returned a non-JSON language list.", 502
+                ) from exc
+            if not isinstance(languages, list):
+                raise PipelineError(
+                    "compiler", "BAD_COMPILER_RESPONSE", "Judge0 returned an unexpected language list.", 502
+                )
+
+            best: dict[str, tuple[tuple[int, ...], int]] = {}
+            for item in languages:
+                if not isinstance(item, dict):
+                    continue
+                name, language_id = item.get("name"), item.get("id")
+                if not isinstance(name, str) or not isinstance(language_id, int):
+                    continue
+                base_name, _, version_label = name.partition("(")
+                key = base_name.strip()
+                if key not in JUDGE0_LANGUAGES:
+                    continue
+                version = tuple(int(part) for part in re.findall(r"\d+", version_label))
+                candidate = (version, language_id)
+                if key not in best or candidate > best[key]:
+                    best[key] = candidate
+            self._language_ids = {name: selected[1] for name, selected in best.items()}
+
+        language_id = self._language_ids.get(language)
+        if language_id is None:
+            raise PipelineError(
+                "compiler", "COMPILER_LANGUAGE_UNAVAILABLE",
+                f"The configured Judge0 instance does not provide {language}.", 400,
+            )
+        return language_id
+
     async def run(self, request: RunRequest) -> dict[str, Any]:
-        language_id = JUDGE0_LANGUAGE_IDS[request.language]
+        headers = self._headers()
+        language_id = await self._language_id(request.language, headers)
         payload = {
             "source_code": request.code,
             "language_id": language_id,
@@ -941,7 +988,6 @@ class Judge0Client:
             "wall_time_limit": 5,
             "memory_limit": 128_000,
         }
-        headers = self._headers()
         endpoint = f"{self.s.judge0_api_url}/submissions"
         timeout = httpx.Timeout(30.0, connect=8.0)
         try:

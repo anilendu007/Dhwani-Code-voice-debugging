@@ -15,11 +15,13 @@ Dhwani-Code is a voice debugging companion for Indian developers. Ask about code
 2. Accepts a spoken or typed question.
 3. Sends audio, code, error output, and the question to Gemini through the backend.
 4. Shows the diagnosis and suggested source line, and can speak the answer.
-5. Highlights pasted code and compiles/runs C++, C, Python, JavaScript, TypeScript, Java, Go, and Rust using Judge0's isolated online execution service.
+5. Highlights pasted code and runs JavaScript and Python locally in the browser. The browser runner needs no compiler API key or separate execution server.
 
 Gemini is used for speech-to-text, code analysis, and text-to-speech. The Gemini API key stays on the server.
 
-Online compilation is separate from Gemini and requires a Judge0 CE key. The browser sends source code and optional standard input to this app's backend; the backend sends them to Judge0, which compiles and executes the program in its sandbox. The compiler key is server-side and never sent to the browser. The app applies runtime, memory, source-size, and input-size limits.
+The browser runner executes JavaScript in a restricted iframe and Python with Pyodide in a Web Worker. Python's WebAssembly runtime is downloaded from jsDelivr on the first run. Program source and standard input for browser runs stay on the user's device. C++, C, TypeScript, Java, Go, and Rust remain syntax-highlighted but are not executable in the browser runner.
+
+The backend's optional `POST /api/run` Judge0 integration remains available for deployments that configure a separate Judge0 service. It is not required by the browser Run button.
 
 ## Logical bug analysis
 
@@ -76,8 +78,8 @@ Open <http://127.0.0.1:8000>. The app must be served by FastAPI; opening `index.
 | `GEMINI_TTS_MODEL` | `gemini-3.8-flash-tts` | Gemini speech-generation model available to your API key |
 | `GEMINI_TTS_VOICE` | `Kore` | Gemini TTS voice |
 | `GEMINI_TIMEOUT_S` | `90` | Request timeout |
-| `JUDGE0_API_KEY` | unset | Required server-side Judge0 CE/RapidAPI key for online code execution |
-| `JUDGE0_API_URL` | `https://judge0-ce.p.rapidapi.com` | Judge0 CE API base URL |
+| `JUDGE0_API_KEY` | unset | Optional server-side key/token for the backend's Judge0 API |
+| `JUDGE0_API_URL` | `https://judge0-ce.p.rapidapi.com` | Optional Judge0 API base URL for the backend endpoint |
 | `MAX_UPLOAD_MB` | `8` | Maximum audio upload size |
 | `CORS_ORIGINS` | `*` | Comma-separated allowed origins |
 | `RATE_LIMIT_PER_HOUR` | `8` | Requests per visitor per hour; `0` disables it |
@@ -88,11 +90,23 @@ Open <http://127.0.0.1:8000>. The app must be served by FastAPI; opening `index.
 
 Restart the server after changing `.env`. Never put the key in `index.html`, a URL, or source control. The included `.gitignore` excludes `.env`.
 
+## Self-hosting Judge0
+
+Judge0 runs separately from this application and is not required for the browser runner. The upstream [deployment procedure](https://github.com/judge0/judge0/blob/master/CHANGELOG.md#deployment-procedure) states that Judge0 is tested on Linux; its isolated execution requires Linux cgroups. Windows Docker Desktop/WSL is not a supported production host and may start the containers while program execution still fails.
+
+On a Linux machine, clone the official [Judge0 repository](https://github.com/judge0/judge0) outside this app's project folder. Before starting it, set strong `REDIS_PASSWORD` and `POSTGRES_PASSWORD` values in `judge0.conf`; enable `AUTHN_HEADER=X-Auth-Token` and set a strong `AUTHN_TOKEN` when the API will be reachable outside the machine. Follow the upstream startup steps, which start the `db` and `redis` services before the full Compose stack.
+
+For an app running on the same Linux host, set `JUDGE0_API_URL=http://localhost:2358`. For an app deployed on Render, **do not use `localhost`**: that points to the Render app container, not your server. Give the Linux server a DNS name, put Judge0 behind an HTTPS reverse proxy, and set `JUDGE0_API_URL` in Render to that HTTPS API URL. If Judge0 token authentication is enabled, set `JUDGE0_API_KEY` to the same token; the backend sends it as `X-Auth-Token`. Do not expose an unauthenticated compiler publicly.
+
+The app only permits HTTPS for remote Judge0 URLs (plain HTTP is permitted for loopback development), so it rejects a remote `http://your-server-ip:2358` URL. The RapidAPI URL remains the default; override it with your own Judge0 URL to use the self-hosted service.
+
+The backend fetches `/languages` and selects the available Judge0 language IDs, so it can work with different IDs across self-hosted and hosted Judge0 releases.
+
 ## Deploying
 
-This repository includes a Render Blueprint in [`render.yaml`](./render.yaml). To deploy it, connect this Git repository to Render and create a Blueprint instance. Render will install the requirements and run Uvicorn bound to `0.0.0.0` on Render's assigned `$PORT`. When prompted, add `GEMINI_API_KEY` and `JUDGE0_API_KEY` in Render's environment settings; do not put either key in the repository.
+This repository includes a Render Blueprint in [`render.yaml`](./render.yaml). To deploy it, connect this Git repository to Render and create a Blueprint instance. Render will install the requirements and run Uvicorn bound to `0.0.0.0` on Render's assigned `$PORT`. Add `GEMINI_API_KEY` in Render's environment settings; the browser runner does not need a Judge0 key.
 
-For an existing Render web service, deploy the latest commit from this repository's branch and set both keys in **Dashboard → Environment**. Create a Judge0 CE key through [Judge0's RapidAPI listing](https://rapidapi.com/judge0-official/api/judge0-ce); its availability and quota depend on the current plan. Keep `JUDGE0_API_URL` at its default for RapidAPI. Confirm the service uses this repository's root directory and the following commands:
+For an existing Render web service, deploy the latest commit from this repository's branch and set `GEMINI_API_KEY` in **Dashboard → Environment**. Add Judge0 settings only if you intend to use the optional backend endpoint. Confirm the service uses this repository's root directory and the following commands:
 
 - Build command: `pip install -r requirements.txt`
 - Start command: `uvicorn main:app --host 0.0.0.0 --port $PORT`
@@ -117,7 +131,7 @@ FastAPI's interactive docs are available at `/docs`.
 
 `POST /api/debug` accepts multipart form fields `audio` or `transcript`, `profile`, `file_name`, `language`, `code`, `error_log`, optional `cursor_line`, and optional `speak_reply`.
 
-`POST /api/run` accepts JSON fields `language`, `code`, and optional `stdin`. Source code and standard input are sent to Judge0 for execution; do not include credentials or private data in them.
+`POST /api/run` accepts JSON fields `language`, `code`, and optional `stdin`. If configured, source code and standard input are sent to Judge0 for execution. The editor's browser runner does not call this endpoint.
 
 If a model is unavailable to the configured key, the API reports `MODEL_NOT_AVAILABLE`. Open `/api/models` on your running server and set `GEMINI_MODEL` and/or `GEMINI_TTS_MODEL` to a listed model that supports the needed operation. Use the model ID (for example `gemini-3.8-flash`), not the Google Cloud project ID. A `models/` resource-name prefix is accepted and removed automatically.
 
@@ -126,11 +140,11 @@ If a model is unavailable to the configured key, the API reports `MODEL_NOT_AVAI
 - The suggested fix is generated by a model; verify it and run your tests before using it.
 - Responses depend on the context provided. The current UI is a mock editor and does not automatically read a real IDE's files or diagnostics.
 - Each question is independent; the model has no conversation memory.
-- Online compilation requires a reachable Judge0 instance and is subject to that service's quota and availability. Programs run with a short CPU/wall-time limit and a 128 MB memory limit.
+- The browser runner currently executes only JavaScript and Python. Python downloads Pyodide from jsDelivr on first use and needs an internet connection; it runs in a Web Worker and has a time limit. Browser-side execution uses the visitor's device and is not a substitute for server-side isolation for untrusted multi-user workloads.
 - Gemini TTS is generated as a complete response before the browser starts playback, rather than streamed as it is generated.
 - The rate limiter is held in memory and resets when the process restarts. It is not a substitute for authentication or persistent quota controls.
 - Gemini API access, available models, quotas, and pricing depend on your Google account and current API configuration.
-- Audio, transcripts, code, and error output used for AI debugging are sent to Google Gemini; code and stdin submitted to the online compiler are sent to Judge0. Do not send secrets or proprietary code unless you are comfortable with those services receiving it.
+- Audio, transcripts, code, and error output used for AI debugging are sent to Google Gemini. Browser-run code and stdin are executed locally; Python's runtime is downloaded from jsDelivr. Do not send secrets or proprietary code to Gemini unless you are comfortable with that service receiving it.
 
 ## Tests
 
